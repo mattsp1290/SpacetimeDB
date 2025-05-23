@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/clockworklabs/SpacetimeDB/crates/bindings-go/internal/bsatn"
 	"github.com/clockworklabs/SpacetimeDB/crates/bindings-go/internal/runtime"
 )
 
@@ -138,20 +139,20 @@ func (db *Database) RegisterIndex(id IndexID, idx *IndexImpl) {
 }
 
 // Serialize serializes data using BSATN format
-// Currently, this is a simple pass-through implementation
-// but will be replaced with actual BSATN serialization in the future
-func (db *Database) Serialize(data []byte) ([]byte, error) {
-	// In a real implementation, this would convert data to BSATN format
-	// For now, just return the data as-is
-	return data, nil
+func (db *Database) Serialize(value interface{}) ([]byte, error) {
+	// If caller already gives us a byte slice, pass it through so existing
+	// code that just wants to stash raw BSATN works unchanged.
+	if b, ok := value.([]byte); ok {
+		return b, nil
+	}
+	// Otherwise marshal via bsatn codec.
+	return bsatn.Marshal(value)
 }
 
-// Deserialize deserializes data from BSATN format
-// Currently, this is a simple pass-through implementation
-// but will be replaced with actual BSATN deserialization in the future
+// Deserialize deserializes data. For compatibility with older code paths this
+// currently just passes the bytes back unchanged.  Higher-level callers can
+// invoke bsatn.Unmarshal themselves when they know the concrete value type.
 func (db *Database) Deserialize(data []byte) ([]byte, error) {
-	// In a real implementation, this would convert BSATN format to raw data
-	// For now, just return the data as-is
 	return data, nil
 }
 

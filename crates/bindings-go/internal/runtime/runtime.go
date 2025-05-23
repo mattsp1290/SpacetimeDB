@@ -7,109 +7,92 @@ import (
 	"sync/atomic"
 )
 
-// Runtime represents a runtime instance for SpacetimeDB
+// Runtime represents a lightweight runtime wrapper used by the in-memory DB
+// and by the wasm host shim.  It intentionally has **no dependency** on
+// internal/wasm or internal/db so that we avoid import cycles
+// (db -> runtime, wasm -> db).  The wasm host embeds *runtime.Runtime, while
+// other packages just need the memory helpers and cleanup logic.
+
 type Runtime struct {
-	// mu protects concurrent access to instance and memory
-	mu sync.RWMutex
-	// memoryUsage tracks current memory usage in bytes
-	memoryUsage atomic.Uint64
-	// memoryAllocs tracks number of memory allocations
-	memoryAllocs atomic.Uint64
-	// memoryFrees tracks number of memory deallocations
-	memoryFrees atomic.Uint64
-	// cleanupFuncs holds cleanup functions to be called on Close
-	cleanupFuncs []func() error
-	// memory is the current module's memory
+	mu sync.RWMutex // protects memory and cleanup lists
+
 	memory []byte
+
+	memoryUsage  atomic.Uint64
+	memoryAllocs atomic.Uint64
+	memoryFrees  atomic.Uint64
+
+	cleanup []func() error
 }
 
-// NewRuntime creates a new Runtime instance
-func NewRuntime() *Runtime {
-	return &Runtime{
-		memory: make([]byte, 0),
-	}
-}
+func New() *Runtime { return &Runtime{memory: make([]byte, 0)} }
 
-// AddCleanup adds a cleanup function to be called on Close
-func (r *Runtime) AddCleanup(fn func() error) {
+// AddCleanup registers a func that will run when Close() is invoked.
+func (r *Runtime) AddCleanup(f func() error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.cleanupFuncs = append(r.cleanupFuncs, fn)
+	r.cleanup = append(r.cleanup, f)
 }
 
-// Close closes the runtime
+// Close executes all registered cleanup funcs.
 func (r *Runtime) Close(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	var lastErr error
-	for _, fn := range r.cleanupFuncs {
-		if err := fn(); err != nil {
-			lastErr = err
+	var last error
+	for _, f := range r.cleanup {
+		if err := f(); err != nil {
+			last = err
 		}
 	}
-	return lastErr
+	return last
 }
 
-// GetMemoryStats returns memory usage statistics
-func (r *Runtime) GetMemoryStats() *MemoryStats {
-	return &MemoryStats{
+// Memory helpers -----------------------------------------------------------
+
+type MemStats struct {
+	Usage  uint64
+	Allocs uint64
+	Frees  uint64
+}
+
+func (r *Runtime) Stats() MemStats {
+	return MemStats{
 		Usage:  r.memoryUsage.Load(),
 		Allocs: r.memoryAllocs.Load(),
 		Frees:  r.memoryFrees.Load(),
 	}
 }
 
-// MemoryStats holds memory usage statistics
-type MemoryStats struct {
-	Usage  uint64 // Current memory usage in bytes
-	Allocs uint64 // Number of allocations
-	Frees  uint64 // Number of deallocations
-}
-
-// CallFunction calls a function in the runtime
-func (r *Runtime) CallFunction(ctx context.Context, name string, params ...interface{}) ([]uint64, error) {
-	// TODO: Implement actual function call
-	return []uint64{0}, nil
-}
-
-// ReadFromMemory reads data from memory
-func (r *Runtime) ReadFromMemory(ptr uint32, size uint32) ([]byte, error) {
+func (r *Runtime) Read(ptr, size uint32) ([]byte, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-
 	if int(ptr)+int(size) > len(r.memory) {
-		return nil, fmt.Errorf("memory read out of bounds: ptr=%d, size=%d, memory_size=%d", ptr, size, len(r.memory))
+		return nil, fmt.Errorf("memory read oob: ptr=%d size=%d mem=%d", ptr, size, len(r.memory))
 	}
-
-	data := make([]byte, size)
-	copy(data, r.memory[ptr:ptr+size])
-	return data, nil
+	out := make([]byte, size)
+	copy(out, r.memory[ptr:ptr+size])
+	return out, nil
 }
 
-// WriteToMemory writes data to memory
-func (r *Runtime) WriteToMemory(data []byte) (uint32, error) {
+func (r *Runtime) Write(data []byte) uint32 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	ptr := uint32(len(r.memory))
 	r.memory = append(r.memory, data...)
-
-	// Update memory stats
 	r.memoryUsage.Add(uint64(len(data)))
 	r.memoryAllocs.Add(1)
-
-	return ptr, nil
+	return ptr
 }
 
-// FreeMemory frees memory at the given pointer
-func (r *Runtime) FreeMemory(ptr uint32, size uint32) {
+func (r *Runtime) Free(ptr, size uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	if int(ptr)+int(size) <= len(r.memory) {
-		// Update memory stats
-		r.memoryUsage.Add(^uint64(size - 1)) // Equivalent to subtracting size
+		r.memoryUsage.Add(^uint64(size - 1))
 		r.memoryFrees.Add(1)
 	}
 }
+
+// Backward-compat helper for packages that still expect internal/runtime.NewRuntime().
+// Prefer using runtime.New going forward.
+func NewRuntime() *Runtime { return New() }
