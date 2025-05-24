@@ -104,6 +104,12 @@ type (
 
 	// ReducerMetrics tracks performance metrics for reducers
 	ReducerMetrics = reducers.ReducerMetrics
+
+	// Iterator provides database iteration interface
+	Iterator = reducers.Iterator
+
+	// DatabaseContext provides database access
+	DatabaseContext = reducers.DatabaseContext
 )
 
 // Schema framework types
@@ -331,6 +337,17 @@ var (
 	BsatnU32ArrayFromBytes    = bsatn.U32ArrayFromBytes
 	BsatnStringArrayToBytes   = bsatn.StringArrayToBytes
 	BsatnStringArrayFromBytes = bsatn.StringArrayFromBytes
+
+	// BSATN helpers for common types
+	BsatnSerializeU8         = bsatn.SerializeU8
+	BsatnDeserializeU8       = bsatn.DeserializeU8
+	BsatnSerializeI32Array   = bsatn.SerializeI32Array
+	BsatnDeserializeI32Array = bsatn.DeserializeI32Array
+	BsatnSerializeStruct     = bsatn.SerializeStruct
+	BsatnDeserializeStruct   = bsatn.DeserializeStruct
+
+	// Database context functions
+	NewDatabaseContext = reducers.NewDatabaseContext
 )
 
 // Package information
@@ -361,4 +378,20 @@ func GetFeatures() []string {
 		"JSON Serialization",
 		"WASM Support",
 	}
+}
+
+// RegisterSimpleReducer provides a simple way to register reducers with a name and handler function
+func RegisterSimpleReducer(name, description string, handler func(ctx *ReducerContext, args []byte) ReducerResult) error {
+	reducer := NewGenericReducer(name, description, handler)
+	return RegisterReducer(reducer)
+}
+
+// RegisterSimpleReducerNoArgs provides a simple way to register reducers that take no arguments
+func RegisterSimpleReducerNoArgs(name, description string, handler func(ctx *ReducerContext) ReducerResult) error {
+	wrappedHandler := func(ctx *ReducerContext, args []byte) ReducerResult {
+		// Ignore args for no-argument reducers
+		return handler(ctx)
+	}
+	reducer := NewGenericReducer(name, description, wrappedHandler)
+	return RegisterReducer(reducer)
 }

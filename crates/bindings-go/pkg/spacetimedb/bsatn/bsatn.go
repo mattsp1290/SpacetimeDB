@@ -425,3 +425,78 @@ const (
 	TypeTagString = 15
 	TypeTagBytes  = 16
 )
+
+// Helper functions for common Go types
+
+// SerializeU8 serializes a uint8 value to BSATN bytes
+func SerializeU8(val uint8) ([]byte, error) {
+	return ToBytes(func(w io.Writer) error {
+		return EncodeU8(w, val)
+	})
+}
+
+// DeserializeU8 deserializes a uint8 value from BSATN bytes
+func DeserializeU8(data []byte) (uint8, error) {
+	var val uint8
+	err := FromBytes(data, func(r io.Reader) error {
+		var err error
+		val, err = DecodeU8(r)
+		return err
+	})
+	return val, err
+}
+
+// SerializeI32Array serializes an array of int32 values to BSATN bytes
+func SerializeI32Array(vals []int32) ([]byte, error) {
+	return ToBytes(func(w io.Writer) error {
+		// Encode array length
+		if err := EncodeU32(w, uint32(len(vals))); err != nil {
+			return err
+		}
+		// Encode each element
+		for _, val := range vals {
+			if err := EncodeI32(w, val); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// DeserializeI32Array deserializes an array of int32 values from BSATN bytes
+func DeserializeI32Array(data []byte) ([]int32, error) {
+	var vals []int32
+	err := FromBytes(data, func(r io.Reader) error {
+		// Decode array length
+		length, err := DecodeU32(r)
+		if err != nil {
+			return err
+		}
+
+		// Sanity check
+		if length > 1000000 { // 1M element limit
+			return &DecodingError{Type: "i32_array", Reason: fmt.Sprintf("array too long: %d elements", length)}
+		}
+
+		// Decode each element
+		vals = make([]int32, length)
+		for i := uint32(0); i < length; i++ {
+			vals[i], err = DecodeI32(r)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return vals, err
+}
+
+// SerializeStruct serializes a struct with custom encoding logic to BSATN bytes
+func SerializeStruct(encoder func(io.Writer) error) ([]byte, error) {
+	return ToBytes(encoder)
+}
+
+// DeserializeStruct deserializes a struct with custom decoding logic from BSATN bytes
+func DeserializeStruct(data []byte, decoder func(io.Reader) error) error {
+	return FromBytes(data, decoder)
+}

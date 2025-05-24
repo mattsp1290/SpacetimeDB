@@ -126,7 +126,7 @@ type ReducerContext struct {
 
 // DatabaseContext provides database access through our Phase 4 system
 type DatabaseContext struct {
-	tables map[string]interface{} // Type-safe table accessors
+	Tables map[string]interface{} // Type-safe table accessors (made public)
 	mu     sync.RWMutex
 }
 
@@ -430,7 +430,7 @@ func (rr *ReducerRegistry) Stats() RegistryStats {
 
 func NewDatabaseContext() *DatabaseContext {
 	return &DatabaseContext{
-		tables: make(map[string]interface{}),
+		Tables: make(map[string]interface{}),
 	}
 }
 
@@ -462,7 +462,7 @@ func (dc *DatabaseContext) GetTable(name string) (interface{}, bool) {
 	dc.mu.RLock()
 	defer dc.mu.RUnlock()
 
-	table, exists := dc.tables[name]
+	table, exists := dc.Tables[name]
 	return table, exists
 }
 
@@ -470,7 +470,7 @@ func (dc *DatabaseContext) RegisterTable(name string, tableAccessor interface{})
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
 
-	dc.tables[name] = tableAccessor
+	dc.Tables[name] = tableAccessor
 }
 
 // Random context methods
@@ -657,4 +657,196 @@ func GetLifecycleFunction(name string) (LifecycleFunction, bool) {
 	// This would retrieve from a global lifecycle registry
 	// For now, return nil, false
 	return nil, false
+}
+
+// Database operations for ReducerContext
+
+// Insert inserts a record into a table
+func (rc *ReducerContext) Insert(data interface{}) error {
+	// TODO: Implement actual database insertion
+	// For now, store in the database context
+	rc.Database.mu.Lock()
+	defer rc.Database.mu.Unlock()
+
+	// Get the table name from the struct type
+	tableName := getTableName(data)
+	if tableName == "" {
+		return fmt.Errorf("unable to determine table name for type %T", data)
+	}
+
+	// Store in mock table for now
+	if rc.Database.Tables[tableName] == nil {
+		rc.Database.Tables[tableName] = make([]interface{}, 0)
+	}
+
+	if table, ok := rc.Database.Tables[tableName].([]interface{}); ok {
+		rc.Database.Tables[tableName] = append(table, data)
+	}
+
+	return nil
+}
+
+// Iterator interface for database iteration
+type Iterator interface {
+	Next() bool
+	Read(dest interface{}) error
+	Close() error
+	Err() error
+}
+
+// MockIterator provides a simple iterator implementation
+type MockIterator struct {
+	data    []interface{}
+	index   int
+	lastErr error
+	closed  bool
+}
+
+// Iter creates an iterator for a table
+func (rc *ReducerContext) Iter(tableName string) (Iterator, error) {
+	rc.Database.mu.RLock()
+	defer rc.Database.mu.RUnlock()
+
+	tableData, exists := rc.Database.Tables[tableName]
+	if !exists {
+		return &MockIterator{data: make([]interface{}, 0)}, nil
+	}
+
+	if data, ok := tableData.([]interface{}); ok {
+		return &MockIterator{
+			data:  data,
+			index: -1,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("table %s has invalid data format", tableName)
+}
+
+// DeleteByID deletes a record from a table by ID
+func (rc *ReducerContext) DeleteByID(tableName string, id interface{}) error {
+	rc.Database.mu.Lock()
+	defer rc.Database.mu.Unlock()
+
+	tableData, exists := rc.Database.Tables[tableName]
+	if !exists {
+		return fmt.Errorf("table %s not found", tableName)
+	}
+
+	if data, ok := tableData.([]interface{}); ok {
+		// Find and remove the item with matching ID
+		for i, item := range data {
+			if itemID := getIDFromStruct(item); itemID != nil && compareIDs(itemID, id) {
+				// Remove item at index i
+				rc.Database.Tables[tableName] = append(data[:i], data[i+1:]...)
+				return nil
+			}
+		}
+		return fmt.Errorf("record with ID %v not found in table %s", id, tableName)
+	}
+
+	return fmt.Errorf("table %s has invalid data format", tableName)
+}
+
+// MockIterator implementation
+
+func (mi *MockIterator) Next() bool {
+	if mi.closed {
+		return false
+	}
+	mi.index++
+	return mi.index < len(mi.data)
+}
+
+func (mi *MockIterator) Read(dest interface{}) error {
+	if mi.closed {
+		return fmt.Errorf("iterator is closed")
+	}
+	if mi.index < 0 || mi.index >= len(mi.data) {
+		return fmt.Errorf("iterator index out of bounds")
+	}
+
+	// Simple copy for demonstration - in real implementation would use reflection
+	// For now, assume dest is compatible with data[index]
+	if destPtr, ok := dest.(*interface{}); ok {
+		*destPtr = mi.data[mi.index]
+		return nil
+	}
+
+	// Try to copy the data using reflection
+	return copyStruct(mi.data[mi.index], dest)
+}
+
+func (mi *MockIterator) Close() error {
+	mi.closed = true
+	return nil
+}
+
+func (mi *MockIterator) Err() error {
+	return mi.lastErr
+}
+
+// Helper functions
+
+func getTableName(data interface{}) string {
+	// Extract table name from struct type
+	switch data.(type) {
+	case BsatnTestResult:
+		return "bsatn_test_result"
+	default:
+		// Use type name as fallback
+		return fmt.Sprintf("%T", data)
+	}
+}
+
+func getIDFromStruct(item interface{}) interface{} {
+	// Extract ID field from struct using reflection
+	val := reflect.ValueOf(item)
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
+	}
+
+	if val.Kind() != reflect.Struct {
+		return nil
+	}
+
+	// Look for common ID field names
+	for _, fieldName := range []string{"Id", "ID", "id"} {
+		field := val.FieldByName(fieldName)
+		if field.IsValid() && field.CanInterface() {
+			return field.Interface()
+		}
+	}
+
+	return nil
+}
+
+func compareIDs(id1, id2 interface{}) bool {
+	return fmt.Sprintf("%v", id1) == fmt.Sprintf("%v", id2)
+}
+
+func copyStruct(src, dest interface{}) error {
+	// Simple struct copying using reflection
+	srcVal := reflect.ValueOf(src)
+	destVal := reflect.ValueOf(dest)
+
+	if destVal.Kind() != reflect.Ptr {
+		return fmt.Errorf("destination must be a pointer")
+	}
+
+	destVal = destVal.Elem()
+
+	if srcVal.Type() != destVal.Type() {
+		return fmt.Errorf("source and destination types don't match: %v vs %v", srcVal.Type(), destVal.Type())
+	}
+
+	destVal.Set(srcVal)
+	return nil
+}
+
+// BsatnTestResult struct definition for the helper functions above
+type BsatnTestResult struct {
+	Id        uint32  `json:"id" bsatn:"id"`
+	TestName  string  `json:"testname" bsatn:"testname"`
+	InputData string  `json:"inputdata" bsatn:"inputdata"`
+	BsatnData []uint8 `json:"bsatndata" bsatn:"bsatndata"`
 }

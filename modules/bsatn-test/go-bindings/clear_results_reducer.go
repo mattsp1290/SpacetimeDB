@@ -6,15 +6,33 @@ import (
 )
 
 // ClearResults is a SpacetimeDB reducer
-// TODO: Implement your reducer logic here
+// Clears all test results from the bsatn_test_result table
 func ClearResults(ctx *spacetimedb.ReducerContext) error {
-	// TODO: Add your reducer implementation here
-	return nil
+	// Query all entries from the table and delete them
+	iter, err := ctx.Iter("bsatn_test_result")
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+
+	for iter.Next() {
+		var result BsatnTestResult
+		if err := iter.Read(&result); err != nil {
+			return err
+		}
+
+		// Delete this entry
+		if err := ctx.DeleteByID("bsatn_test_result", result.Id); err != nil {
+			return err
+		}
+	}
+
+	return iter.Err()
 }
 
 // RegisterClearResults registers the clear_results reducer with SpacetimeDB
 func RegisterClearResults() {
-	spacetimedb.RegisterReducer("clear_results", "ClearResults", func(ctx *spacetimedb.ReducerContext, args []byte) spacetimedb.ReducerResult {
+	spacetimedb.RegisterSimpleReducerNoArgs("clear_results", "ClearResults", func(ctx *spacetimedb.ReducerContext) spacetimedb.ReducerResult {
 		if err := ClearResults(ctx); err != nil {
 			return spacetimedb.ReducerResult{Error: err}
 		}
