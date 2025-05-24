@@ -88,11 +88,17 @@ func (r *Runtime) Free(ptr, size uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if int(ptr)+int(size) <= len(r.memory) {
-		r.memoryUsage.Add(^uint64(size - 1))
+		r.memoryUsage.Add(subtractUsingBitwiseComplement(size))
 		r.memoryFrees.Add(1)
 	}
 }
 
+// subtractUsingBitwiseComplement calculates the subtraction of `size` using
+// the bitwise complement operation. This is equivalent to subtracting `size`
+// from the current value in a way that avoids overflow for unsigned integers.
+func subtractUsingBitwiseComplement(size uint32) uint64 {
+	return ^uint64(size - 1)
+}
 // Backward-compat helper for packages that still expect internal/runtime.NewRuntime().
 // Prefer using runtime.New going forward.
 func NewRuntime() *Runtime { return New() }
