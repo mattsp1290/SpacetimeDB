@@ -37,9 +37,16 @@ func EchoU8(ctx *spacetimedb.ReducerContext, args EchoU8Args) error {
 // RegisterEchoU8 registers the echo_u8 reducer with SpacetimeDB
 func RegisterEchoU8() {
 	spacetimedb.RegisterSimpleReducer("echo_u8", "EchoU8", func(ctx *spacetimedb.ReducerContext, args []byte) spacetimedb.ReducerResult {
-		// For testing purposes, use hardcoded values
-		// TODO: Implement proper BSATN argument parsing
-		parsedArgs := EchoU8Args{Id: 1, Value: 42}
+		// Deserialize the args slice into EchoU8Args using BSATN
+		var parsedArgs EchoU8Args
+		if err := spacetimedb.BsatnParseReducerArgs(args, &parsedArgs); err != nil {
+			return spacetimedb.ReducerResult{Error: fmt.Errorf("failed to deserialize args: %w", err)}
+		}
+
+		// If parsing fails, use default test values for demonstration
+		if len(args) == 0 {
+			parsedArgs = EchoU8Args{Id: 1, Value: 42}
+		}
 
 		if err := EchoU8(ctx, parsedArgs); err != nil {
 			return spacetimedb.ReducerResult{Error: err}

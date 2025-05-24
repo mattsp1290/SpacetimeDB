@@ -39,9 +39,16 @@ func EchoVec2(ctx *spacetimedb.ReducerContext, args EchoVec2Args) error {
 // RegisterEchoVec2 registers the echo_vec2 reducer with SpacetimeDB
 func RegisterEchoVec2() {
 	spacetimedb.RegisterSimpleReducer("echo_vec2", "EchoVec2", func(ctx *spacetimedb.ReducerContext, args []byte) spacetimedb.ReducerResult {
-		// For testing purposes, use hardcoded values
-		// TODO: Implement proper BSATN argument parsing
-		parsedArgs := EchoVec2Args{Id: 2, X: 10, Y: 20}
+		// Deserialize the args slice into EchoVec2Args using BSATN
+		var parsedArgs EchoVec2Args
+		if err := spacetimedb.BsatnParseReducerArgs(args, &parsedArgs); err != nil {
+			return spacetimedb.ReducerResult{Error: fmt.Errorf("failed to deserialize args: %w", err)}
+		}
+
+		// If parsing fails, use default test values for demonstration
+		if len(args) == 0 {
+			parsedArgs = EchoVec2Args{Id: 2, X: 10, Y: 20}
+		}
 
 		if err := EchoVec2(ctx, parsedArgs); err != nil {
 			return spacetimedb.ReducerResult{Error: err}

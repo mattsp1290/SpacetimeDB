@@ -126,8 +126,36 @@ type ReducerContext struct {
 
 // DatabaseContext provides database access through our Phase 4 system
 type DatabaseContext struct {
-	Tables map[string]interface{} // Type-safe table accessors (made public)
+	tables map[string]interface{} // Type-safe table accessors (kept private)
 	mu     sync.RWMutex
+}
+
+// GetTables provides controlled access to the tables map
+func (dc *DatabaseContext) GetTables() map[string]interface{} {
+	dc.mu.RLock()
+	defer dc.mu.RUnlock()
+
+	// Return a copy to prevent external modification
+	tablesCopy := make(map[string]interface{})
+	for name, table := range dc.tables {
+		tablesCopy[name] = table
+	}
+	return tablesCopy
+}
+
+// SetTable safely sets a table in the context
+func (dc *DatabaseContext) SetTable(name string, table interface{}) {
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
+	dc.tables[name] = table
+}
+
+// HasTable checks if a table exists
+func (dc *DatabaseContext) HasTable(name string) bool {
+	dc.mu.RLock()
+	defer dc.mu.RUnlock()
+	_, exists := dc.tables[name]
+	return exists
 }
 
 // Identity represents a client or system identity
@@ -430,7 +458,7 @@ func (rr *ReducerRegistry) Stats() RegistryStats {
 
 func NewDatabaseContext() *DatabaseContext {
 	return &DatabaseContext{
-		Tables: make(map[string]interface{}),
+		tables: make(map[string]interface{}),
 	}
 }
 
@@ -455,22 +483,6 @@ func NewWasmContext() *WasmContext {
 			MaxMemory:         10 * 1024 * 1024, // 10MB max
 		},
 	}
-}
-
-// Database context methods
-func (dc *DatabaseContext) GetTable(name string) (interface{}, bool) {
-	dc.mu.RLock()
-	defer dc.mu.RUnlock()
-
-	table, exists := dc.Tables[name]
-	return table, exists
-}
-
-func (dc *DatabaseContext) RegisterTable(name string, tableAccessor interface{}) {
-	dc.mu.Lock()
-	defer dc.mu.Unlock()
-
-	dc.Tables[name] = tableAccessor
 }
 
 // Random context methods
@@ -675,12 +687,12 @@ func (rc *ReducerContext) Insert(data interface{}) error {
 	}
 
 	// Store in mock table for now
-	if rc.Database.Tables[tableName] == nil {
-		rc.Database.Tables[tableName] = make([]interface{}, 0)
+	if rc.Database.tables[tableName] == nil {
+		rc.Database.tables[tableName] = make([]interface{}, 0)
 	}
 
-	if table, ok := rc.Database.Tables[tableName].([]interface{}); ok {
-		rc.Database.Tables[tableName] = append(table, data)
+	if table, ok := rc.Database.tables[tableName].([]interface{}); ok {
+		rc.Database.tables[tableName] = append(table, data)
 	}
 
 	return nil
@@ -707,7 +719,7 @@ func (rc *ReducerContext) Iter(tableName string) (Iterator, error) {
 	rc.Database.mu.RLock()
 	defer rc.Database.mu.RUnlock()
 
-	tableData, exists := rc.Database.Tables[tableName]
+	tableData, exists := rc.Database.tables[tableName]
 	if !exists {
 		return &MockIterator{data: make([]interface{}, 0)}, nil
 	}
@@ -727,7 +739,7 @@ func (rc *ReducerContext) DeleteByID(tableName string, id interface{}) error {
 	rc.Database.mu.Lock()
 	defer rc.Database.mu.Unlock()
 
-	tableData, exists := rc.Database.Tables[tableName]
+	tableData, exists := rc.Database.tables[tableName]
 	if !exists {
 		return fmt.Errorf("table %s not found", tableName)
 	}
@@ -737,7 +749,7 @@ func (rc *ReducerContext) DeleteByID(tableName string, id interface{}) error {
 		for i, item := range data {
 			if itemID := getIDFromStruct(item); itemID != nil && compareIDs(itemID, id) {
 				// Remove item at index i
-				rc.Database.Tables[tableName] = append(data[:i], data[i+1:]...)
+				rc.Database.tables[tableName] = append(data[:i], data[i+1:]...)
 				return nil
 			}
 		}
