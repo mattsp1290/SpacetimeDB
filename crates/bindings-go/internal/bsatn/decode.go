@@ -167,7 +167,7 @@ func unmarshalRecursive(r *Reader) interface{} {
 			log.Printf("[unmarshalRecursive TagOptionSome] error processing payload: %v. Reader state: bytesRead=%d", r.Error(), r.BytesRead())
 			return nil
 		}
-		return &val // Return pointer to the interface value, as before
+		return val // Return the interface value directly, following Go idioms
 	case TagStruct:
 		fieldCount, err := r.ReadStructHeader() // Assumes TagStruct was consumed
 		if err != nil {
