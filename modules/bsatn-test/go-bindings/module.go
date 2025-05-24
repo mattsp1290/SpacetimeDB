@@ -22,7 +22,6 @@ func RegisterModule() error {
 // init automatically registers the module when the package is imported
 func init() {
 	if err := RegisterModule(); err != nil {
-		log.Printf("Error during SpacetimeDB module registration: %v", err)
-		panic("Failed to register SpacetimeDB module: " + err.Error())
+		log.Fatalf("Failed to register SpacetimeDB module: %v", err)
 	}
 }
