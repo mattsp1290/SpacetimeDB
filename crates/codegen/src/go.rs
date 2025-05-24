@@ -76,6 +76,20 @@ impl Go {
         name.to_case(convert_case::Case::Pascal)
     }
 
+    /// Check if a type requires the spacetimedb import
+    fn type_needs_spacetimedb_import(&self, ty: &AlgebraicTypeUse) -> bool {
+        match ty {
+            AlgebraicTypeUse::Identity
+            | AlgebraicTypeUse::ConnectionId
+            | AlgebraicTypeUse::Timestamp
+            | AlgebraicTypeUse::TimeDuration
+            | AlgebraicTypeUse::ScheduleAt => true,
+            AlgebraicTypeUse::Array(elem_ty) => self.type_needs_spacetimedb_import(elem_ty),
+            AlgebraicTypeUse::Option(inner) => self.type_needs_spacetimedb_import(inner),
+            _ => false,
+        }
+    }
+
     /// Generate file header with package and imports
     fn file_header(&self, imports: &[&str]) -> String {
         let mut result = format!("// {}\n", crate::util::AUTO_GENERATED_PREFIX);
@@ -193,12 +207,25 @@ impl Lang for Go {
     }
 
     fn generate_type(&self, module: &ModuleDef, typ: &TypeDef) -> String {
-        let mut result = self.file_header(&[
-            "github.com/clockworklabs/SpacetimeDB/crates/bindings-go/pkg/spacetimedb",
-        ]);
-
         let type_name = crate::util::collect_case(convert_case::Case::Pascal, typ.name.name_segments());
         
+        // Check if we need the spacetimedb import by examining the type definition
+        let needs_spacetimedb_import = match &module.typespace_for_generate()[typ.ty] {
+            AlgebraicTypeDef::Product(product) => {
+                product.elements.iter().any(|(_, field_ty)| self.type_needs_spacetimedb_import(field_ty))
+            }
+            AlgebraicTypeDef::Sum(_) => true, // Sum types always need the import for interfaces
+            AlgebraicTypeDef::PlainEnum(_) => false, // Plain enums don't need imports
+        };
+        
+        let imports = if needs_spacetimedb_import {
+            &["github.com/clockworklabs/SpacetimeDB/crates/bindings-go/pkg/spacetimedb"][..]
+        } else {
+            &[][..]
+        };
+        
+        let mut result = self.file_header(imports);
+
         match &module.typespace_for_generate()[typ.ty] {
             AlgebraicTypeDef::Product(product) => {
                 result.push_str(&format!("// {} represents a product type\n", type_name));
@@ -230,6 +257,22 @@ impl Lang for Go {
                     match variant_ty {
                         AlgebraicTypeUse::Unit => {
                             result.push_str(&format!("type {} struct {{}}\n\n", variant_type_name));
+                        }
+                        AlgebraicTypeUse::Ref(_) => {
+                            // For type references, use "Variant" suffix to avoid naming conflicts
+                            // with separately defined product types
+                            let safe_variant_type_name = format!("{}{}Variant", type_name, variant_name);
+                            result.push_str(&format!("// {} represents the {} variant of {}\n", safe_variant_type_name, variant_name, type_name));
+                            result.push_str(&format!("type {} struct {{\n", safe_variant_type_name));
+                            result.push_str(&format!("\tValue {} `json:\"value\" bsatn:\"value\"`\n", self.go_type(variant_ty, module)));
+                            result.push_str("}\n\n");
+                            
+                            // Implement interface method with safe name
+                            result.push_str(&format!("// Is{} implements the {} interface\n", type_name, type_name));
+                            result.push_str(&format!("func (v *{}) Is{}() bool {{\n", safe_variant_type_name, type_name));
+                            result.push_str("\treturn true\n");
+                            result.push_str("}\n\n");
+                            continue;
                         }
                         _ => {
                             result.push_str(&format!("type {} struct {{\n", variant_type_name));
