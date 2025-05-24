@@ -4,6 +4,5 @@ package autogen
 // RawMiscModuleExportV9 represents a plain enum
 type RawMiscModuleExportV9 uint8
 
-const (
-)
+// (Removed the empty const block)
 
