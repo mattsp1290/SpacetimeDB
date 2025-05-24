@@ -10,7 +10,6 @@ type RawModuleDef interface {
 	IsRawModuleDef() bool
 }
 
-// RawModuleDefV8BackCompat represents the V8BackCompat variant of RawModuleDef
 // RawModuleDefV8BackCompatVariant represents the V8BackCompat variant of RawModuleDef
 type RawModuleDefV8BackCompatVariant struct {
 	Value RawModuleDefV8 `json:"value" bsatn:"value"`
