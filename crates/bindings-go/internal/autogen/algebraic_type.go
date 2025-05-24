@@ -21,32 +21,35 @@ func (v *AlgebraicTypeRef) IsAlgebraicType() bool {
 }
 
 // AlgebraicTypeSum represents the Sum variant of AlgebraicType
-type AlgebraicTypeSum struct {
+// AlgebraicTypeSumVariant represents the Sum variant of AlgebraicType
+type AlgebraicTypeSumVariant struct {
 	Value SumType `json:"value" bsatn:"value"`
 }
 
 // IsAlgebraicType implements the AlgebraicType interface
-func (v *AlgebraicTypeSum) IsAlgebraicType() bool {
+func (v *AlgebraicTypeSumVariant) IsAlgebraicType() bool {
 	return true
 }
 
 // AlgebraicTypeProduct represents the Product variant of AlgebraicType
-type AlgebraicTypeProduct struct {
+// AlgebraicTypeProductVariant represents the Product variant of AlgebraicType
+type AlgebraicTypeProductVariant struct {
 	Value ProductType `json:"value" bsatn:"value"`
 }
 
 // IsAlgebraicType implements the AlgebraicType interface
-func (v *AlgebraicTypeProduct) IsAlgebraicType() bool {
+func (v *AlgebraicTypeProductVariant) IsAlgebraicType() bool {
 	return true
 }
 
 // AlgebraicTypeArray represents the Array variant of AlgebraicType
-type AlgebraicTypeArray struct {
+// AlgebraicTypeArrayVariant represents the Array variant of AlgebraicType
+type AlgebraicTypeArrayVariant struct {
 	Value AlgebraicType `json:"value" bsatn:"value"`
 }
 
 // IsAlgebraicType implements the AlgebraicType interface
-func (v *AlgebraicTypeArray) IsAlgebraicType() bool {
+func (v *AlgebraicTypeArrayVariant) IsAlgebraicType() bool {
 	return true
 }
 

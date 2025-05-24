@@ -11,12 +11,13 @@ type MiscModuleExport interface {
 }
 
 // MiscModuleExportTypeAlias represents the TypeAlias variant of MiscModuleExport
-type MiscModuleExportTypeAlias struct {
+// MiscModuleExportTypeAliasVariant represents the TypeAlias variant of MiscModuleExport
+type MiscModuleExportTypeAliasVariant struct {
 	Value TypeAlias `json:"value" bsatn:"value"`
 }
 
 // IsMiscModuleExport implements the MiscModuleExport interface
-func (v *MiscModuleExportTypeAlias) IsMiscModuleExport() bool {
+func (v *MiscModuleExportTypeAliasVariant) IsMiscModuleExport() bool {
 	return true
 }
 

@@ -11,22 +11,24 @@ type RawModuleDef interface {
 }
 
 // RawModuleDefV8BackCompat represents the V8BackCompat variant of RawModuleDef
-type RawModuleDefV8BackCompat struct {
+// RawModuleDefV8BackCompatVariant represents the V8BackCompat variant of RawModuleDef
+type RawModuleDefV8BackCompatVariant struct {
 	Value RawModuleDefV8 `json:"value" bsatn:"value"`
 }
 
 // IsRawModuleDef implements the RawModuleDef interface
-func (v *RawModuleDefV8BackCompat) IsRawModuleDef() bool {
+func (v *RawModuleDefV8BackCompatVariant) IsRawModuleDef() bool {
 	return true
 }
 
 // RawModuleDefV9 represents the V9 variant of RawModuleDef
-type RawModuleDefV9 struct {
+// RawModuleDefV9Variant represents the V9 variant of RawModuleDef
+type RawModuleDefV9Variant struct {
 	Value RawModuleDefV9 `json:"value" bsatn:"value"`
 }
 
 // IsRawModuleDef implements the RawModuleDef interface
-func (v *RawModuleDefV9) IsRawModuleDef() bool {
+func (v *RawModuleDefV9Variant) IsRawModuleDef() bool {
 	return true
 }
 

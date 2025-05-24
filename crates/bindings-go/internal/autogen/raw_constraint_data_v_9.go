@@ -11,12 +11,13 @@ type RawConstraintDataV9 interface {
 }
 
 // RawConstraintDataV9Unique represents the Unique variant of RawConstraintDataV9
-type RawConstraintDataV9Unique struct {
+// RawConstraintDataV9UniqueVariant represents the Unique variant of RawConstraintDataV9
+type RawConstraintDataV9UniqueVariant struct {
 	Value RawUniqueConstraintDataV9 `json:"value" bsatn:"value"`
 }
 
 // IsRawConstraintDataV9 implements the RawConstraintDataV9 interface
-func (v *RawConstraintDataV9Unique) IsRawConstraintDataV9() bool {
+func (v *RawConstraintDataV9UniqueVariant) IsRawConstraintDataV9() bool {
 	return true
 }
 
