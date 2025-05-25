@@ -5,7 +5,7 @@ use clap::parser::ValueSource;
 use clap::Arg;
 use clap::ArgAction::Set;
 use fs_err as fs;
-use spacetimedb_codegen::{generate, Csharp, Go, Lang, Rust, TypeScript, AUTO_GENERATED_PREFIX};
+use spacetimedb_codegen::{generate, Csharp, Go, Lang, Python, Rust, TypeScript, AUTO_GENERATED_PREFIX};
 use spacetimedb_lib::de::serde::DeserializeWrapper;
 use spacetimedb_lib::{sats, RawModuleDef};
 use spacetimedb_schema;
@@ -15,6 +15,7 @@ use std::process::{Command, Stdio};
 
 use crate::tasks::csharp::dotnet_format;
 use crate::tasks::go::go_format;
+use crate::tasks::python::python_format;
 use crate::tasks::rust::rustfmt;
 use crate::util::{resolve_sibling_binary, y_or_n};
 use crate::Config;
@@ -149,6 +150,7 @@ pub async fn exec_ex(
         }
         Language::Rust => &Rust,
         Language::TypeScript => &TypeScript,
+        Language::Python => &Python,
     };
 
     for (fname, code) in generate(&module, gen_lang) {
@@ -220,11 +222,12 @@ pub enum Language {
     Go,
     TypeScript,
     Rust,
+    Python,
 }
 
 impl clap::ValueEnum for Language {
     fn value_variants<'a>() -> &'a [Self] {
-        &[Self::Csharp, Self::Go, Self::TypeScript, Self::Rust]
+        &[Self::Csharp, Self::Go, Self::TypeScript, Self::Rust, Self::Python]
     }
     fn to_possible_value(&self) -> Option<PossibleValue> {
         Some(match self {
@@ -232,6 +235,7 @@ impl clap::ValueEnum for Language {
             Self::Go => clap::builder::PossibleValue::new("go").aliases(["golang"]),
             Self::TypeScript => clap::builder::PossibleValue::new("typescript").aliases(["ts", "TS"]),
             Self::Rust => clap::builder::PossibleValue::new("rust").aliases(["rs", "RS"]),
+            Self::Python => clap::builder::PossibleValue::new("python").aliases(["py"]),
         })
     }
 }
@@ -242,6 +246,7 @@ impl Language {
             Language::Rust => rustfmt(generated_files)?,
             Language::Csharp => dotnet_format(generated_files)?,
             Language::Go => go_format(generated_files)?,
+            Language::Python => python_format(generated_files)?,
             Language::TypeScript => {
                 // TODO: implement formatting.
             }

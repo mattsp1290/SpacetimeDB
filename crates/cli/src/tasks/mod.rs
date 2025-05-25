@@ -41,4 +41,5 @@ pub fn build(project_path: &Path, lint_dir: Option<&Path>, build_debug: bool) ->
 
 pub mod csharp;
 pub mod go;
+pub mod python;
 pub mod rust;
