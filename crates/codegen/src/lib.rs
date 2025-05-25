@@ -4,12 +4,14 @@ use spacetimedb_schema::identifier::Identifier;
 mod code_indenter;
 pub mod csharp;
 pub mod go;
+pub mod python;
 pub mod rust;
 pub mod typescript;
 mod util;
 
 pub use self::csharp::Csharp;
 pub use self::go::Go;
+pub use self::python::Python;
 pub use self::rust::Rust;
 pub use self::typescript::TypeScript;
 pub use util::AUTO_GENERATED_PREFIX;
