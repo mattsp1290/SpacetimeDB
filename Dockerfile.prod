@@ -1,0 +1,392 @@
+# SpacetimeDB Professional Dockerfile
+# Copyright (C) 2023 Clockwork Laboratories, Inc.
+# Licensed under Business Source License 1.1
+
+# Build argument for Rust version pinning
+ARG RUST_VERSION=1.84-bookworm
+
+# Stage 1: Dependencies caching layer
+FROM rust:${RUST_VERSION} AS dependencies
+WORKDIR /usr/src/app
+
+# Copy dependency files
+COPY Cargo.lock ./
+
+# Copy root Cargo.toml and modify it to exclude modules
+COPY Cargo.toml ./Cargo.toml.orig
+
+# Create minimal Cargo.toml that only includes necessary crates
+RUN sed '/^members = \[/,/^\]/c\
+members = [\
+  "crates/auth",\
+  "crates/bench",\
+  "crates/bindings-sys",\
+  "crates/bindings",\
+  "crates/bindings-macro",\
+  "crates/cli",\
+  "crates/client-api",\
+  "crates/client-api-messages",\
+  "crates/commitlog",\
+  "crates/core",\
+  "crates/data-structures",\
+  "crates/durability",\
+  "crates/execution",\
+  "crates/expr",\
+  "crates/fs-utils",\
+  "crates/lib",\
+  "crates/metrics",\
+  "crates/paths",\
+  "crates/physical-plan",\
+  "crates/primitives",\
+  "crates/query",\
+  "crates/sats",\
+  "crates/schema",\
+  "crates/sdk",\
+  "crates/snapshot",\
+  "crates/sqltest",\
+  "crates/sql-parser",\
+  "crates/standalone",\
+  "crates/subscription",\
+  "crates/table",\
+  "crates/testing",\
+  "crates/update",\
+  "crates/vm",\
+  "crates/codegen",\
+]' Cargo.toml.orig > Cargo.toml
+
+# Copy each crate's Cargo.toml file while preserving directory structure
+RUN mkdir -p crates
+COPY crates/auth/Cargo.toml crates/auth/
+COPY crates/bench/Cargo.toml crates/bench/
+COPY crates/bindings/Cargo.toml crates/bindings/
+COPY crates/bindings-macro/Cargo.toml crates/bindings-macro/
+COPY crates/bindings-sys/Cargo.toml crates/bindings-sys/
+COPY crates/cli/Cargo.toml crates/cli/
+COPY crates/client-api/Cargo.toml crates/client-api/
+COPY crates/client-api-messages/Cargo.toml crates/client-api-messages/
+COPY crates/codegen/Cargo.toml crates/codegen/
+COPY crates/commitlog/Cargo.toml crates/commitlog/
+COPY crates/core/Cargo.toml crates/core/
+COPY crates/data-structures/Cargo.toml crates/data-structures/
+COPY crates/durability/Cargo.toml crates/durability/
+COPY crates/execution/Cargo.toml crates/execution/
+COPY crates/expr/Cargo.toml crates/expr/
+COPY crates/fs-utils/Cargo.toml crates/fs-utils/
+COPY crates/lib/Cargo.toml crates/lib/
+COPY crates/metrics/Cargo.toml crates/metrics/
+COPY crates/paths/Cargo.toml crates/paths/
+COPY crates/physical-plan/Cargo.toml crates/physical-plan/
+COPY crates/primitives/Cargo.toml crates/primitives/
+COPY crates/query/Cargo.toml crates/query/
+COPY crates/sats/Cargo.toml crates/sats/
+COPY crates/schema/Cargo.toml crates/schema/
+COPY crates/sdk/Cargo.toml crates/sdk/
+COPY crates/snapshot/Cargo.toml crates/snapshot/
+COPY crates/sql-parser/Cargo.toml crates/sql-parser/
+COPY crates/sqltest/Cargo.toml crates/sqltest/
+COPY crates/standalone/Cargo.toml crates/standalone/
+COPY crates/subscription/Cargo.toml crates/subscription/
+COPY crates/table/Cargo.toml crates/table/
+COPY crates/testing/Cargo.toml crates/testing/
+COPY crates/update/Cargo.toml crates/update/
+COPY crates/vm/Cargo.toml crates/vm/
+
+# Create dummy src files to satisfy cargo
+RUN for crate in crates/*/; do \
+        mkdir -p "$crate/src" && \
+        # Always create lib.rs as most crates have a library
+        echo "" > "$crate/src/lib.rs" && \
+        # Check for explicit bins
+        if grep -q '^\[\[bin\]\]' "$crate/Cargo.toml" 2>/dev/null; then \
+            mkdir -p "$crate/src/bin" && \
+            # Extract bin names and create dummy files
+            grep -A1 '^\[\[bin\]\]' "$crate/Cargo.toml" | grep '^name' | sed 's/.*"\(.*\)".*/\1/' | while read bin; do \
+                echo "fn main() {}" > "$crate/src/bin/$bin.rs"; \
+            done; \
+        fi && \
+        # Check for benchmarks
+        if grep -q '^\[\[bench\]\]' "$crate/Cargo.toml" 2>/dev/null; then \
+            mkdir -p "$crate/benches" && \
+            # Extract bench names and create dummy files
+            grep -A1 '^\[\[bench\]\]' "$crate/Cargo.toml" | grep '^name' | sed 's/.*"\(.*\)".*/\1/' | while read bench; do \
+                echo "fn main() {}" > "$crate/benches/$bench.rs"; \
+            done; \
+        fi && \
+        # Check for tests
+        if grep -q '^\[\[test\]\]' "$crate/Cargo.toml" 2>/dev/null; then \
+            mkdir -p "$crate/tests" && \
+            # Extract test names and create dummy files
+            grep -A1 '^\[\[test\]\]' "$crate/Cargo.toml" | grep '^name' | sed 's/.*"\(.*\)".*/\1/' | while read test; do \
+                echo "fn main() {}" > "$crate/tests/$test.rs"; \
+            done; \
+        fi && \
+        # Check for main.rs style binary
+        if grep -q 'path = "src/main.rs"' "$crate/Cargo.toml" 2>/dev/null; then \
+            echo "fn main() {}" > "$crate/src/main.rs"; \
+        fi; \
+    done
+
+# Build dependencies in release mode
+RUN cargo build --release --locked -p spacetimedb-standalone -p spacetimedb-cli
+
+# Stage 2: Builder
+FROM rust:${RUST_VERSION} AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/app
+
+# Copy the entire source code
+COPY . .
+
+# Use the same minimal workspace configuration
+RUN sed '/^members = \[/,/^\]/c\
+members = [\
+  "crates/auth",\
+  "crates/bench",\
+  "crates/bindings-sys",\
+  "crates/bindings",\
+  "crates/bindings-macro",\
+  "crates/cli",\
+  "crates/client-api",\
+  "crates/client-api-messages",\
+  "crates/commitlog",\
+  "crates/core",\
+  "crates/data-structures",\
+  "crates/durability",\
+  "crates/execution",\
+  "crates/expr",\
+  "crates/fs-utils",\
+  "crates/lib",\
+  "crates/metrics",\
+  "crates/paths",\
+  "crates/physical-plan",\
+  "crates/primitives",\
+  "crates/query",\
+  "crates/sats",\
+  "crates/schema",\
+  "crates/sdk",\
+  "crates/snapshot",\
+  "crates/sqltest",\
+  "crates/sql-parser",\
+  "crates/standalone",\
+  "crates/subscription",\
+  "crates/table",\
+  "crates/testing",\
+  "crates/update",\
+  "crates/vm",\
+  "crates/codegen",\
+]' Cargo.toml > Cargo.toml.new && mv Cargo.toml.new Cargo.toml
+
+# Copy pre-built dependencies from cache stage
+COPY --from=dependencies /usr/src/app/target target
+COPY --from=dependencies /usr/local/cargo /usr/local/cargo
+
+# Build arguments for versioning
+ARG BUILD_DATE
+ARG VCS_REF
+ARG VERSION=latest
+
+# Build in release mode with optimizations
+ENV CARGO_PROFILE_RELEASE_LTO=true \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+    CARGO_PROFILE_RELEASE_OPT_LEVEL=3
+
+RUN cargo build -p spacetimedb-standalone -p spacetimedb-cli --release --locked && \
+    # Strip debug symbols to reduce binary size
+    strip target/release/spacetimedb-standalone && \
+    strip target/release/spacetimedb-cli
+
+# Stage 3: Runtime preparation
+FROM debian:bookworm-slim AS runtime-prep
+
+# Install runtime dependencies and security updates
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    binaryen \
+    libssl3 \
+    tini \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install .NET Runtime for WASM support
+ARG TARGETARCH
+RUN DOTNET_ARCH=${TARGETARCH} && \
+    if [ "$DOTNET_ARCH" = "amd64" ]; then \
+        DOTNET_ARCH="x64"; \
+    elif [ "$DOTNET_ARCH" = "arm64" ]; then \
+        DOTNET_ARCH="arm64"; \
+    else \
+        echo "Unsupported architecture: $DOTNET_ARCH" && exit 1; \
+    fi && \
+    curl -sSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin \
+        --channel 8.0 \
+        --runtime dotnet \
+        --install-dir /usr/share/dotnet \
+        --architecture $DOTNET_ARCH \
+        --no-path
+
+# Stage 4: Final production image
+FROM runtime-prep AS production
+
+# Metadata labels
+LABEL org.opencontainers.image.title="SpacetimeDB" \
+      org.opencontainers.image.description="A database that replaces your server" \
+      org.opencontainers.image.authors="Clockwork Laboratories, Inc." \
+      org.opencontainers.image.vendor="Clockwork Laboratories, Inc." \
+      org.opencontainers.image.licenses="BSL-1.1" \
+      org.opencontainers.image.url="https://spacetimedb.com" \
+      org.opencontainers.image.source="https://github.com/clockworklabs/SpacetimeDB" \
+      org.opencontainers.image.documentation="https://spacetimedb.com/docs" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${VERSION}"
+
+# Copy LICENSE file to standard location
+COPY LICENSE.txt /usr/share/licenses/spacetimedb/LICENSE.txt
+
+# Install Rust toolchain for module compilation (minimal)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    --profile minimal \
+    --default-toolchain stable \
+    --target wasm32-unknown-unknown \
+    && /root/.cargo/bin/rustup component add rust-std-wasm32-unknown-unknown
+
+# Set up environment
+ENV PATH="/usr/share/dotnet:/root/.cargo/bin:${PATH}" \
+    DOTNET_ROOT="/usr/share/dotnet" \
+    RUST_LOG=info \
+    SPACETIMEDB_DATA_DIR="/var/lib/spacetimedb" \
+    SPACETIMEDB_LOG_DIR="/var/log/spacetimedb"
+
+# Copy binaries from builder
+COPY --from=builder --chmod=755 /usr/src/app/target/release/spacetimedb-standalone /usr/local/bin/spacetimedb-standalone
+COPY --from=builder --chmod=755 /usr/src/app/target/release/spacetimedb-cli /usr/local/bin/spacetime
+
+# Create spacetime user and necessary directories
+RUN useradd -r -s /bin/false -m -d /var/lib/spacetimedb spacetime && \
+    mkdir -p /var/lib/spacetimedb/data /var/log/spacetimedb /etc/spacetimedb && \
+    chown -R spacetime:spacetime /var/lib/spacetimedb /var/log/spacetimedb /etc/spacetimedb
+
+# Volume declarations for persistent data
+VOLUME ["/var/lib/spacetimedb", "/var/log/spacetimedb", "/etc/spacetimedb"]
+
+# Copy entrypoint script
+COPY --chmod=755 <<'EOF' /usr/local/bin/docker-entrypoint.sh
+#!/bin/bash
+set -e
+
+# Function to handle signals for graceful shutdown
+trap 'echo "Shutting down..."; kill -TERM $PID; wait $PID' SIGTERM SIGINT
+
+# Initialize configuration if not exists
+if [ ! -f /etc/spacetimedb/server.toml ]; then
+    echo "Initializing default configuration..."
+    cat > /etc/spacetimedb/server.toml <<CONFIG
+[database]
+path = "/var/lib/spacetimedb/data"
+
+[log]
+path = "/var/log/spacetimedb"
+level = "${SPACETIMEDB_LOG_LEVEL:-info}"
+
+[server]
+host = "0.0.0.0"
+port = 3000
+CONFIG
+fi
+
+# Generate JWT keys if not exist
+if [ ! -f /etc/spacetimedb/id_ecdsa ]; then
+    echo "Generating JWT keys..."
+    openssl ecparam -genkey -name prime256v1 -noout -out /etc/spacetimedb/id_ecdsa
+    openssl ec -in /etc/spacetimedb/id_ecdsa -pubout -out /etc/spacetimedb/id_ecdsa.pub
+    chown spacetime:spacetime /etc/spacetimedb/id_ecdsa*
+    chmod 600 /etc/spacetimedb/id_ecdsa
+    chmod 644 /etc/spacetimedb/id_ecdsa.pub
+fi
+
+# Handle different commands
+case "$1" in
+    start|server)
+        echo "Starting SpacetimeDB server..."
+        exec gosu spacetime spacetimedb-standalone start \
+            --data-dir "${SPACETIMEDB_DATA_DIR:-/var/lib/spacetimedb/data}" \
+            --jwt-pub-key-path /etc/spacetimedb/id_ecdsa.pub \
+            --jwt-priv-key-path /etc/spacetimedb/id_ecdsa \
+            ${SPACETIMEDB_EXTRA_ARGS} &
+        PID=$!
+        wait $PID
+        ;;
+    cli|spacetime)
+        shift
+        exec gosu spacetime spacetime "$@"
+        ;;
+    *)
+        # Pass through to spacetime CLI
+        exec gosu spacetime spacetime "$@"
+        ;;
+esac
+EOF
+
+# Install gosu for proper user switching
+RUN curl -L https://github.com/tianon/gosu/releases/download/1.17/gosu-${TARGETARCH:-amd64} -o /usr/local/bin/gosu && \
+    chmod +x /usr/local/bin/gosu && \
+    gosu nobody true
+
+# Install additional tools for operational tasks
+RUN apt-get update && apt-get install -y \
+    openssl \
+    netcat-openbsd \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Switch to non-root user
+USER spacetime
+WORKDIR /var/lib/spacetimedb
+
+# Expose ports
+EXPOSE 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:3000/ping || exit 1
+
+# Use tini as init system for proper signal handling
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
+
+# Default command
+CMD ["start"]
+
+# Stage 5: Development image (optional)
+FROM production AS development
+
+USER root
+
+# Install development tools
+RUN apt-get update && apt-get install -y \
+    git \
+    vim \
+    htop \
+    strace \
+    tcpdump \
+    gdb \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust development tools
+RUN /root/.cargo/bin/rustup component add \
+    rustfmt \
+    clippy \
+    rust-analyzer
+
+USER spacetime
+
+# Development-specific environment variables
+ENV RUST_BACKTRACE=full \
+    RUST_LOG=debug

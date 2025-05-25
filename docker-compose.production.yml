@@ -1,0 +1,106 @@
+# SpacetimeDB Production Docker Compose Configuration
+# This file demonstrates a production-ready setup for SpacetimeDB
+
+version: '3.8'
+
+services:
+  spacetimedb:
+    # Replace with your private registry URL
+    image: ${DOCKER_REGISTRY:-spacetimedb}:${SPACETIMEDB_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: spacetimedb-production
+    restart: unless-stopped
+    
+    # Use init system for proper signal handling
+    init: true
+    
+    ports:
+      - "${SPACETIMEDB_PORT:-3000}:3000"
+    
+    volumes:
+      # Persistent data storage
+      - spacetimedb-data:/var/lib/spacetimedb
+      
+      # Log storage
+      - spacetimedb-logs:/var/log/spacetimedb
+      
+      # Configuration directory (optional - for custom configs)
+      - ./config:/etc/spacetimedb:ro
+      
+      # Module deployment directory (optional - for easy module publishing)
+      - ./modules:/opt/modules:ro
+    
+    environment:
+      # Logging configuration
+      - SPACETIMEDB_LOG_LEVEL=${SPACETIMEDB_LOG_LEVEL:-info}
+      - RUST_LOG=${RUST_LOG:-info}
+      
+      # Additional configuration
+      - SPACETIMEDB_EXTRA_ARGS=${SPACETIMEDB_EXTRA_ARGS:-}
+    
+    # Health check configuration
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/ping"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 40s
+    
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+    
+    # Network configuration
+    networks:
+      - spacetime-network
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "10"
+
+  # Optional: Reverse proxy for HTTPS
+  nginx:
+    image: nginx:alpine
+    container_name: spacetimedb-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - spacetimedb
+    networks:
+      - spacetime-network
+    profiles:
+      - with-proxy
+
+volumes:
+  spacetimedb-data:
+    driver: local
+  spacetimedb-logs:
+    driver: local
+
+networks:
+  spacetime-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16

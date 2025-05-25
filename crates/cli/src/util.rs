@@ -196,16 +196,18 @@ pub enum ModuleLanguage {
     Csharp,
     Rust,
     Go,
+    Python,
 }
 impl clap::ValueEnum for ModuleLanguage {
     fn value_variants<'a>() -> &'a [Self] {
-        &[Self::Csharp, Self::Rust, Self::Go]
+        &[Self::Csharp, Self::Rust, Self::Go, Self::Python]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
         match self {
             Self::Csharp => Some(clap::builder::PossibleValue::new("csharp").aliases(["c#", "cs", "C#", "CSharp"])),
             Self::Rust => Some(clap::builder::PossibleValue::new("rust").aliases(["rs", "Rust"])),
             Self::Go => Some(clap::builder::PossibleValue::new("go").aliases(["golang", "Go"])),
+            Self::Python => Some(clap::builder::PossibleValue::new("python").aliases(["py", "Python"])),
         }
     }
 }

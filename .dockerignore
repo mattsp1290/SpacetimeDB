@@ -1,3 +1,66 @@
-**/target
-# we do our own version pinning in the Dockerfile
-rust-toolchain.toml
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Build artifacts
+target/
+
+# Development files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation
+docs/
+*.md
+!LICENSE.txt
+
+# Test files
+**/*_test.go
+**/*_test.rs
+**/tests/
+**/benches/
+smoketests/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Local development
+.env
+.env.*
+!.env.sample
+
+# Docker files (except the ones we need)
+docker-compose*.yml
+.dockerignore
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Editor directories
+.vim/
+.emacs.d/
+
+# Development scripts
+run_*.sh
+tools/
+git-hooks/
+
+# Images and assets (except what's needed)
+images/
