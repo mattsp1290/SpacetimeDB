@@ -225,6 +225,8 @@ pub fn detect_module_language(path_to_project: &Path) -> anyhow::Result<ModuleLa
         Ok(ModuleLanguage::Csharp)
     } else if path_to_project.join("go.mod").exists() {
         Ok(ModuleLanguage::Go)
+    } else if path_to_project.join("pyproject.toml").exists() || path_to_project.join("setup.py").exists() {
+        Ok(ModuleLanguage::Python)
     } else {
         anyhow::bail!("Could not detect the language of the module. Are you in a SpacetimeDB project directory?")
     }

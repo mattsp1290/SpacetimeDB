@@ -100,6 +100,27 @@ fn check_for_go() -> bool {
     false
 }
 
+fn check_for_python() -> bool {
+    match std::env::consts::OS {
+        "linux" | "freebsd" | "netbsd" | "openbsd" | "solaris" | "macos" => {
+            if find_executable("python3").is_some() || find_executable("python").is_some() {
+                return true;
+            }
+            println!("{}", "Warning: You have created a Python project, but you are missing Python. You should install Python from:\n\n\thttps://python.org/downloads/\n".yellow());
+        }
+        "windows" => {
+            if find_executable("python.exe").is_some() || find_executable("python3.exe").is_some() {
+                return true;
+            }
+            println!("{}", "Warning: You have created a Python project, but you are missing Python. Visit https://python.org/downloads/ for installation instructions.\n".yellow());
+        }
+        unsupported_os => {
+            println!("{}", format!("This OS may be unsupported: {}", unsupported_os).yellow());
+        }
+    }
+    false
+}
+
 fn check_for_git() -> bool {
     match std::env::consts::OS {
         "linux" | "freebsd" | "netbsd" | "openbsd" | "solaris" => {
@@ -163,6 +184,7 @@ pub async fn exec(_config: Config, args: &ArgMatches) -> Result<(), anyhow::Erro
         ModuleLanguage::Rust => exec_init_rust(args).await,
         ModuleLanguage::Csharp => exec_init_csharp(args).await,
         ModuleLanguage::Go => exec_init_go(args).await,
+        ModuleLanguage::Python => exec_init_python(args).await,
     }
 }
 
@@ -238,6 +260,37 @@ pub async fn exec_init_go(args: &ArgMatches) -> anyhow::Result<()> {
 
     // Check all dependencies
     check_for_go();
+    check_for_git();
+
+    for data_file in export_files {
+        let path = project_path.join(data_file.1);
+
+        create_directory(path.parent().unwrap())?;
+
+        std::fs::write(path, data_file.0)?;
+    }
+
+    println!(
+        "{}",
+        format!("Project successfully created at path: {}", project_path.display()).green()
+    );
+
+    Ok(())
+}
+
+pub async fn exec_init_python(args: &ArgMatches) -> anyhow::Result<()> {
+    let project_path = args.get_one::<PathBuf>("project-path").unwrap();
+
+    let export_files = vec![
+        (include_str!("project/python/pyproject._toml"), "pyproject.toml"),
+        (include_str!("project/python/__init__._py"), "src/__init__.py"),
+        (include_str!("project/python/main._py"), "src/main.py"),
+        (include_str!("project/python/_gitignore"), ".gitignore"),
+        (include_str!("project/python/requirements._txt"), "requirements.txt"),
+    ];
+
+    // Check all dependencies
+    check_for_python();
     check_for_git();
 
     for data_file in export_files {

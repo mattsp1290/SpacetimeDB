@@ -1,0 +1,154 @@
+"""
+SpacetimeDB Python Module Example
+
+This example demonstrates:
+- Creating tables with SpacetimeDB
+- Defining reducers
+- Working with different data types
+"""
+
+from typing import List, Optional
+from dataclasses import dataclass
+from spacetimedb_sdk import (
+    table,
+    reducer,
+    Identity,
+    Timestamp,
+    autoinc,
+    unique,
+)
+
+
+# Define a User table
+@table
+@dataclass
+class User:
+    # Primary key with auto-increment
+    id: int = autoinc()
+    
+    # Unique username
+    username: str = unique()
+    
+    # User's display name
+    name: str
+    
+    # When the user was created
+    created_at: Timestamp
+    
+    # Optional bio
+    bio: Optional[str] = None
+
+
+# Define a Message table
+@table
+@dataclass
+class Message:
+    # Primary key with auto-increment
+    id: int = autoinc()
+    
+    # Foreign key to User
+    sender_id: int
+    
+    # Message content
+    content: str
+    
+    # When the message was sent
+    sent_at: Timestamp
+    
+    # Optional recipient (None for broadcast)
+    recipient_id: Optional[int] = None
+
+
+# Reducer to create a new user
+@reducer
+def create_user(ctx, username: str, name: str, bio: Optional[str] = None) -> None:
+    """Create a new user with the given username and name."""
+    # Check if username already exists
+    existing = User.filter_by_username(username)
+    if existing:
+        raise ValueError(f"Username '{username}' already exists")
+    
+    # Create the new user
+    User.insert(
+        username=username,
+        name=name,
+        created_at=Timestamp.now(),
+        bio=bio
+    )
+
+
+# Reducer to update user profile
+@reducer
+def update_profile(ctx, user_id: int, name: Optional[str] = None, bio: Optional[str] = None) -> None:
+    """Update a user's profile information."""
+    user = User.filter_by_id(user_id)
+    if not user:
+        raise ValueError(f"User with id {user_id} not found")
+    
+    # Update fields if provided
+    if name is not None:
+        user.name = name
+    if bio is not None:
+        user.bio = bio
+    
+    user.update()
+
+
+# Reducer to send a message
+@reducer
+def send_message(ctx, sender_id: int, content: str, recipient_id: Optional[int] = None) -> None:
+    """Send a message from one user to another (or broadcast)."""
+    # Verify sender exists
+    sender = User.filter_by_id(sender_id)
+    if not sender:
+        raise ValueError(f"Sender with id {sender_id} not found")
+    
+    # Verify recipient exists if specified
+    if recipient_id is not None:
+        recipient = User.filter_by_id(recipient_id)
+        if not recipient:
+            raise ValueError(f"Recipient with id {recipient_id} not found")
+    
+    # Create the message
+    Message.insert(
+        sender_id=sender_id,
+        content=content,
+        sent_at=Timestamp.now(),
+        recipient_id=recipient_id
+    )
+
+
+# Reducer to get user's messages
+@reducer
+def get_user_messages(ctx, user_id: int) -> List[Message]:
+    """Get all messages sent by or to a specific user."""
+    # Get messages where user is sender or recipient
+    messages = Message.filter(
+        lambda m: m.sender_id == user_id or m.recipient_id == user_id
+    )
+    return list(messages)
+
+
+# Reducer to get broadcast messages
+@reducer
+def get_broadcast_messages(ctx) -> List[Message]:
+    """Get all broadcast messages (no specific recipient)."""
+    messages = Message.filter(lambda m: m.recipient_id is None)
+    return list(messages)
+
+
+# Initialize function (called when module is deployed)
+def __init_module__(ctx) -> None:
+    """Initialize the module with some default data."""
+    # Create a system user
+    create_user(ctx, "system", "System Administrator", "Official system account")
+    
+    # Send a welcome message
+    system_user = User.filter_by_username("system")
+    if system_user:
+        send_message(
+            ctx,
+            system_user.id,
+            "Welcome to SpacetimeDB! This is your Python module running.",
+            None  # Broadcast to all
+        )

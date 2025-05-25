@@ -1,0 +1,10 @@
+"""
+SpacetimeDB Python Module
+
+This module demonstrates how to create tables, reducers, and
+interact with SpacetimeDB using Python.
+"""
+
+from .main import *
+
+__version__ = "0.1.0"
