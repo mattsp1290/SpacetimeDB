@@ -2268,7 +2268,7 @@ pub(crate) mod test {
         // Walk all the rows we inserted, project them to the cols that will be their keys,
         // sum their key size,
         // and assert it matches the `index.num_key_bytes()`
-        let key_size_in_pvs = vals
+        let key_size_in_pvs: u64 = vals
             .iter()
             .map(|row| crate::table_index::KeySize::key_size_in_bytes(&row.project(&indexed_columns).unwrap()) as u64)
             .sum();

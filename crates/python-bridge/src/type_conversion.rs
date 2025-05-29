@@ -4,14 +4,14 @@
 //! and Python objects with advanced error handling, performance optimizations, and batch processing.
 
 use wasm_bindgen::prelude::*;
-use js_sys::{Object, Array, Reflect, Function};
+use js_sys::{Object, Array, Reflect};
 use web_sys::console;
 use spacetimedb_lib::AlgebraicValue;
 use spacetimedb_sats::{AlgebraicType, ArrayValue, SumValue, ProductValue};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use crate::pyodide_runtime::PyodideRuntime;
-use crate::error::{ConversionError, ValidationError};
+use crate::error::ConversionError;
 
 /// Cache entry for type information
 #[derive(Debug, Clone)]
@@ -59,7 +59,7 @@ impl ConversionObjectPool {
         self.js_objects.pop_front().unwrap_or_else(|| Object::new())
     }
 
-    pub fn return_object(&mut self, mut obj: Object) {
+    pub fn return_object(&mut self, obj: Object) {
         if self.js_objects.len() < self.max_pool_size {
             // Clear the object before returning to pool
             let keys = Object::keys(&obj);
@@ -75,7 +75,7 @@ impl ConversionObjectPool {
         self.js_arrays.pop_front().unwrap_or_else(|| Array::new())
     }
 
-    pub fn return_array(&mut self, mut arr: Array) {
+    pub fn return_array(&mut self, arr: Array) {
         if self.js_arrays.len() < self.max_pool_size {
             // Clear the array before returning to pool
             arr.set_length(0);
@@ -147,7 +147,7 @@ impl SmartTypeCache {
 }
 
 /// Enhanced statistics for performance monitoring
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct ConversionStats {
     pub conversions_performed: u64,
     pub cache_hits: u64,
@@ -252,8 +252,14 @@ impl TypeConverter {
             AlgebraicValue::U32(u) => Ok(JsValue::from(*u)),
             AlgebraicValue::I64(i) => self.safe_i64_to_python(*i),
             AlgebraicValue::U64(u) => self.safe_u64_to_python(*u),
-            AlgebraicValue::I128(i) => self.large_int_to_python(&i.0.to_string()),
-            AlgebraicValue::U128(u) => self.large_int_to_python(&u.0.to_string()),
+            AlgebraicValue::I128(i) => {
+                let val = i.0;
+                self.large_int_to_python(&val.to_string())
+            }
+            AlgebraicValue::U128(u) => {
+                let val = u.0;
+                self.large_int_to_python(&val.to_string())
+            }
             AlgebraicValue::F32(f) => Ok(JsValue::from(f.into_inner())),
             AlgebraicValue::F64(f) => Ok(JsValue::from(f.into_inner())),
             AlgebraicValue::String(s) => Ok(JsValue::from_str(s)),
@@ -405,9 +411,25 @@ impl TypeConverter {
             AlgebraicType::F64 => self.convert_to_f64(value),
             AlgebraicType::String => self.convert_to_string(value),
             
-            AlgebraicType::Product(fields) => self.python_to_product(value, fields),
-            AlgebraicType::Sum(variants) => self.python_to_sum(value, variants),
-            AlgebraicType::Array(element_type) => self.python_to_typed_array(value, element_type),
+            AlgebraicType::Product(product_type) => {
+                // Extract field types from the product
+                let field_types: Vec<AlgebraicType> = product_type.elements
+                    .iter()
+                    .map(|elem| elem.algebraic_type.clone())
+                    .collect();
+                self.python_to_product(value, &field_types)
+            }
+            AlgebraicType::Sum(sum_type) => {
+                // Extract variant types from the sum
+                let variant_types: Vec<AlgebraicType> = sum_type.variants
+                    .iter()
+                    .map(|variant| variant.algebraic_type.clone())
+                    .collect();
+                self.python_to_sum(value, &variant_types)
+            }
+            AlgebraicType::Array(array_type) => {
+                self.python_to_typed_array(value, &array_type.elem_ty)
+            }
             
             _ => {
                 self.conversion_stats.errors_encountered += 1;
@@ -720,3 +742,232 @@ impl TypeConverter {
             if n >= i16::MIN as f64 && n <= i16::MAX as f64 && n.fract() == 0.0 {
                 Ok(AlgebraicValue::I16(n as i16))
             } else {
+                Err(ConversionError::NumberOutOfRange {
+                    value: n,
+                    target_type: "i16".to_string(),
+                })
+            }
+        } else {
+            Err(ConversionError::TypeMismatch {
+                expected: "i16".to_string(),
+                found: self.get_js_type_name(value),
+            })
+        }
+    }
+
+    fn convert_to_u16(&self, value: &JsValue) -> Result<AlgebraicValue, ConversionError> {
+        if let Some(n) = value.as_f64() {
+            if n >= 0.0 && n <= u16::MAX as f64 && n.fract() == 0.0 {
+                Ok(AlgebraicValue::U16(n as u16))
+            } else {
+                Err(ConversionError::NumberOutOfRange {
+                    value: n,
+                    target_type: "u16".to_string(),
+                })
+            }
+        } else {
+            Err(ConversionError::TypeMismatch {
+                expected: "u16".to_string(),
+                found: self.get_js_type_name(value),
+            })
+        }
+    }
+
+    fn convert_to_i32(&self, value: &JsValue) -> Result<AlgebraicValue, ConversionError> {
+        if let Some(n) = value.as_f64() {
+            if n >= i32::MIN as f64 && n <= i32::MAX as f64 && n.fract() == 0.0 {
+                Ok(AlgebraicValue::I32(n as i32))
+            } else {
+                Err(ConversionError::NumberOutOfRange {
+                    value: n,
+                    target_type: "i32".to_string(),
+                })
+            }
+        } else {
+            Err(ConversionError::TypeMismatch {
+                expected: "i32".to_string(),
+                found: self.get_js_type_name(value),
+            })
+        }
+    }
+
+    fn convert_to_u32(&self, value: &JsValue) -> Result<AlgebraicValue, ConversionError> {
+        if let Some(n) = value.as_f64() {
+            if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 {
+                Ok(AlgebraicValue::U32(n as u32))
+            } else {
+                Err(ConversionError::NumberOutOfRange {
+                    value: n,
+                    target_type: "u32".to_string(),
+                })
+            }
+        } else {
+            Err(ConversionError::TypeMismatch {
+                expected: "u32".to_string(),
+                found: self.get_js_type_name(value),
+            })
+        }
+    }
+
+    fn convert_to_i64(&self, value: &JsValue) -> Result<AlgebraicValue, ConversionError> {
+        if let Some(n) = value.as_f64() {
+            Ok(AlgebraicValue::I64(n as i64))
+        } else if let Some(s) = value.as_string() {
+            s.parse::<i64>()
+                .map(AlgebraicValue::I64)
+                .map_err(|_| ConversionError::NumberParseError {
+                    value: s,
+                    target_type: "i64".to_string(),
+                })
+        } else {
+            Err(ConversionError::TypeMismatch {
+                expected: "i64".to_string(),
+                found: self.get_js_type_name(value),
+            })
+        }
+    }
+
+    fn convert_to_u64(&self, value: &JsValue) -> Result<AlgebraicValue, ConversionError> {
+        if let Some(n) = value.as_f64() {
+            Ok(AlgebraicValue::U64(n as u64))
+        } else if let Some(s) = value.as_string() {
+            s.parse::<u64>()
+                .map(AlgebraicValue::U64)
+                .map_err(|_| ConversionError::NumberParseError {
+                    value: s,
+                    target_type: "u64".to_string(),
+                })
+        } else {
+            Err(ConversionError::TypeMismatch {
+                expected: "u64".to_string(),
+                found: self.get_js_type_name(value),
+            })
+        }
+    }
+
+    fn convert_to_i128(&self, value: &JsValue) -> Result<AlgebraicValue, ConversionError> {
+        if let Some(s) = value.as_string() {
+            s.parse::<i128>()
+                .map(|v| AlgebraicValue::I128(v.into()))
+                .map_err(|_| ConversionError::NumberParseError {
+                    value: s,
+                    target_type: "i128".to_string(),
+                })
+        } else {
+            Err(ConversionError::TypeMismatch {
+                expected: "i128".to_string(),
+                found: self.get_js_type_name(value),
+            })
+        }
+    }
+
+    fn convert_to_u128(&self, value: &JsValue) -> Result<AlgebraicValue, ConversionError> {
+        if let Some(s) = value.as_string() {
+            s.parse::<u128>()
+                .map(|v| AlgebraicValue::U128(v.into()))
+                .map_err(|_| ConversionError::NumberParseError {
+                    value: s,
+                    target_type: "u128".to_string(),
+                })
+        } else {
+            Err(ConversionError::TypeMismatch {
+                expected: "u128".to_string(),
+                found: self.get_js_type_name(value),
+            })
+        }
+    }
+
+    fn convert_to_f32(&self, value: &JsValue) -> Result<AlgebraicValue, ConversionError> {
+        if let Some(n) = value.as_f64() {
+            Ok(AlgebraicValue::F32((n as f32).into()))
+        } else {
+            Err(ConversionError::TypeMismatch {
+                expected: "f32".to_string(),
+                found: self.get_js_type_name(value),
+            })
+        }
+    }
+
+    fn convert_to_f64(&self, value: &JsValue) -> Result<AlgebraicValue, ConversionError> {
+        if let Some(n) = value.as_f64() {
+            Ok(AlgebraicValue::F64(n.into()))
+        } else {
+            Err(ConversionError::TypeMismatch {
+                expected: "f64".to_string(),
+                found: self.get_js_type_name(value),
+            })
+        }
+    }
+
+    fn convert_to_string(&self, value: &JsValue) -> Result<AlgebraicValue, ConversionError> {
+        if let Some(s) = value.as_string() {
+            Ok(AlgebraicValue::String(s.into()))
+        } else {
+            Err(ConversionError::TypeMismatch {
+                expected: "string".to_string(),
+                found: self.get_js_type_name(value),
+            })
+        }
+    }
+
+    fn python_to_product(&mut self, value: &JsValue, _fields: &[AlgebraicType]) -> Result<AlgebraicValue, ConversionError> {
+        if !value.is_object() {
+            return Err(ConversionError::TypeMismatch {
+                expected: "object".to_string(),
+                found: self.get_js_type_name(value),
+            });
+        }
+
+        // TODO: Implement proper product conversion with field validation
+        Err(ConversionError::UnsupportedType {
+            type_name: "Product".to_string(),
+            context: "Python to BSATN product conversion".to_string(),
+        })
+    }
+
+    fn python_to_sum(&mut self, value: &JsValue, _variants: &[AlgebraicType]) -> Result<AlgebraicValue, ConversionError> {
+        if !value.is_object() {
+            return Err(ConversionError::TypeMismatch {
+                expected: "object".to_string(),
+                found: self.get_js_type_name(value),
+            });
+        }
+
+        // TODO: Implement proper sum conversion with variant validation
+        Err(ConversionError::UnsupportedType {
+            type_name: "Sum".to_string(),
+            context: "Python to BSATN sum conversion".to_string(),
+        })
+    }
+
+    fn python_to_typed_array(&mut self, value: &JsValue, _element_type: &AlgebraicType) -> Result<AlgebraicValue, ConversionError> {
+        if !Array::is_array(value) {
+            return Err(ConversionError::TypeMismatch {
+                expected: "array".to_string(),
+                found: self.get_js_type_name(value),
+            });
+        }
+
+        // TODO: Implement proper typed array conversion
+        Err(ConversionError::UnsupportedType {
+            type_name: "Array".to_string(),
+            context: "Python to BSATN typed array conversion".to_string(),
+        })
+    }
+
+    fn python_array_to_bsatn(&mut self, _value: &JsValue) -> Result<AlgebraicValue, ConversionError> {
+        // TODO: Implement array conversion with type inference
+        Err(ConversionError::UnsupportedType {
+            type_name: "Array".to_string(),
+            context: "Python array to BSATN conversion".to_string(),
+        })
+    }
+
+    fn python_object_to_bsatn(&mut self, _value: &JsValue) -> Result<AlgebraicValue, ConversionError> {
+        // TODO: Implement object conversion with type inference
+        Err(ConversionError::UnsupportedType {
+            type_name: "Object".to_string(),
+            context: "Python object to BSATN conversion".to_string(),
+        })
+    }
+}

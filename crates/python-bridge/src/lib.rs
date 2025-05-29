@@ -416,7 +416,7 @@ pub fn test_type_conversion(test_data: &JsValue) -> Result<JsValue, JsValue> {
                 Ok(JsValue::from_str("Enhanced type conversion test completed"))
             } else {
                 // Use basic bridge for testing
-                let basic_bridge = BsatnBridge::new();
+                let _basic_bridge = BsatnBridge::new();
                 match crate::bsatn_bridge::test_bsatn_conversion(test_data) {
                     Ok(result) => {
                         console::log_1(&"Basic BSATN conversion test successful".into());
