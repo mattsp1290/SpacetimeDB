@@ -4,7 +4,7 @@ use crate::db::datastore::locking_tx_datastore::MutTxId;
 use crate::db::datastore::traits::{IsolationLevel, Program, TxData};
 use crate::energy::EnergyQuanta;
 use crate::error::DBError;
-use crate::execution_context::{Workload, WorkloadType};
+use crate::execution_context::{ReducerContext, Workload, WorkloadType};
 use crate::hash::Hash;
 use crate::identity::Identity;
 use crate::replica_context::ReplicaContext;
@@ -14,6 +14,7 @@ use crate::util::asyncify;
 use crate::util::lending_pool::{LendingPool, LentResource, PoolClosed};
 use crate::worker_metrics::WORKER_METRICS;
 use anyhow::Context;
+use bytes::Bytes;
 use derive_more::From;
 use futures::{Future, FutureExt};
 use indexmap::IndexSet;
@@ -370,7 +371,7 @@ pub fn init_database(
     let rcr = match module_def.lifecycle_reducer(Lifecycle::Init) {
         None => {
             if let Some((tx_data, tx_metrics, reducer)) = stdb.commit_tx(tx)? {
-                tx_metrics.report_with_db(&reducer, stdb, Some(&tx_data));
+                stdb.report(&reducer, &tx_metrics, Some(&tx_data));
             }
             None
         }
@@ -805,7 +806,7 @@ impl ModuleHost {
                     Ok::<(), anyhow::Error>(())
                 })?;
                         if let Some((tx_data, tx_metrics, reducer)) = stdb.commit_tx(tx)? {
-                            tx_metrics.report_with_db(&reducer, stdb, Some(&tx_data));
+                            stdb.report(&reducer, &tx_metrics, Some(&tx_data));
                         }
                         Ok(())
                     }
@@ -813,16 +814,39 @@ impl ModuleHost {
                     EventStatus::OutOfEnergy => Err(ClientConnectedError::OutOfEnergy),
                 }
             } else {
-                let stdb = &*self.replica_ctx().relational_db;
-                let tx = stdb.begin_mut_tx(IsolationLevel::Serializable, Workload::Internal);
-                let (tx, ()) = stdb.with_auto_rollback(tx, |_tx| {
-                    Ok::<(), anyhow::Error>(())
-                })?;
-                if let Some((tx_data, tx_metrics, reducer)) = stdb.commit_tx(tx)? {
-                    tx_metrics.report_with_db(&reducer, stdb, Some(&tx_data));
-                }
-                Ok(())
-            }
+            // The module doesn't define a client_connected reducer.
+            // Commit a transaction to update `st_clients`
+            // and to ensure we always have those events paired in the commitlog.
+            //
+            // This is necessary to be able to disconnect clients after a server crash.
+            let reducer_name = reducer_lookup
+                .as_ref()
+                .map(|(_, def)| &*def.name)
+                .unwrap_or("__identity_connected__");
+
+            let workload = Workload::Reducer(ReducerContext {
+                name: reducer_name.to_owned(),
+                caller_identity,
+                caller_connection_id,
+                timestamp: Timestamp::now(),
+                arg_bsatn: Bytes::new(),
+            });
+
+            let stdb = self.inner.replica_ctx().relational_db.clone();
+            asyncify(move || {
+                stdb.with_auto_commit(workload, |mut_tx| {
+                    mut_tx
+                        .insert_st_client(caller_identity, caller_connection_id)
+                        .map_err(DBError::from)
+                })
+            })
+            .await
+            .inspect_err(|e| {
+                log::error!("`call_identity_connected`: fallback transaction to insert into `st_client` failed: {e:#?}")
+            })
+            .map_err(DBError::from)
+            .map_err(Into::into)
+        }
         }.instrument(span).await
     }
 
@@ -830,39 +854,86 @@ impl ModuleHost {
         &self,
         caller_identity: Identity,
         caller_connection_id: ConnectionId,
-    ) -> anyhow::Result<()> {
+) -> Result<(), ReducerCallError> {
         let span = wasm_telemetry::module_lifecycle_span("identity_disconnected", &self.info.database_identity);
         async move {
-            let stdb = &*self.replica_ctx().relational_db;
-            let tx = stdb.begin_mut_tx(IsolationLevel::Serializable, Workload::Internal);
-            let (tx, ()) = stdb.with_auto_rollback(tx, |_tx| {
-                Ok::<(), anyhow::Error>(())
-            })?;
-            if let Some((tx_data, tx_metrics, reducer)) = stdb.commit_tx(tx)? {
-                tx_metrics.report_with_db(&reducer, stdb, Some(&tx_data));
-            }
+            let reducer_lookup = self.info.module_def.lifecycle_reducer(Lifecycle::OnDisconnect);
 
-            if let Some((_, reducer_def)) = self.info.module_def.lifecycle_reducer(Lifecycle::OnDisconnect) {
-                let reducer_name = &reducer_def.name;
-                if let Err(e) = self
+            // A fallback transaction that deletes the client from `st_client`.
+            let fallback = || async {
+                let reducer_name = reducer_lookup
+                    .as_ref()
+                    .map(|(_, def)| &*def.name)
+                    .unwrap_or("__identity_disconnected__");
+
+                let workload = Workload::Reducer(ReducerContext {
+                    name: reducer_name.to_owned(),
+                    caller_identity,
+                    caller_connection_id,
+                    timestamp: Timestamp::now(),
+                    arg_bsatn: Bytes::new(),
+                });
+                let stdb = self.inner.replica_ctx().relational_db.clone();
+                let database_identity = self.info.database_identity;
+                asyncify(move || {
+                    stdb.with_auto_commit(workload, |mut_tx| {
+                        mut_tx
+                            .delete_st_client(caller_identity, caller_connection_id, database_identity)
+                            .map_err(DBError::from)
+                    })
+                })
+                .await
+                .map_err(|err| {
+                    log::error!(
+                        "`call_identity_disconnected`: fallback transaction to delete from `st_client` failed: {err}"
+                    );
+                    InvalidReducerArguments {
+                        err: err.into(),
+                        reducer: reducer_name.into(),
+                    }
+                    .into()
+                })
+            };
+
+            if let Some((reducer_id, reducer_def)) = reducer_lookup {
+                // The module defined a lifecycle reducer to handle disconnects. Call it.
+                // If it succeeds, `WasmModuleInstance::call_reducer_with_tx` has already ensured
+                // that `st_client` is updated appropriately.
+                let result = self
                     .call_reducer(
                         caller_identity,
                         caller_connection_id,
                         None,
                         None,
                         None,
-                        reducer_name,
+                        &reducer_def.name,
                         ReducerArgs::Nullary,
                     )
-                    .await
-                {
-                    log::error!("Error calling client_disconnected reducer: {e}");
+                    .await;
+
+                // If it failed, we still need to update `st_client`: the client's not coming back.
+                // Commit a separate transaction that just updates `st_client`.
+                //
+                // It's OK for this to not be atomic with the previous transaction,
+                // since that transaction didn't commit. If we crash before committing this one,
+                // we'll run the `client_disconnected` reducer again unnecessarily,
+                // but the commitlog won't contain two invocations of it, which is what we care about.
+                match result {
+                    Err(e) => {
+                        log::error!("call_reducer of client_disconnected failed: {e:#?}");
+                        fallback().await
+                    }
+                    Ok(event) => match event.status {
+                        EventStatus::Failed(_) | EventStatus::OutOfEnergy => fallback().await,
+                        EventStatus::Committed(_) => Ok(()),
+                    }
                 }
+            } else {
+                // No client_disconnected reducer defined, just run the fallback
+                fallback().await
             }
-            Ok(())
         }.instrument(span).await
     }
-
     pub async fn call_reducer(
         &self,
         caller_identity: Identity,
