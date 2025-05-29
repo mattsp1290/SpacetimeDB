@@ -1,51 +1,45 @@
-use super::{ArgsTuple, InvalidReducerArguments, ReducerArgs, ReducerCallResult, ReducerId, ReducerOutcome, Scheduler};
+use super::{wasm_telemetry, ArgsTuple, InvalidReducerArguments, ReducerArgs, ReducerCallResult, ReducerId, ReducerOutcome, Scheduler};
 use crate::client::{ClientActorId, ClientConnectionSender};
-use crate::database_logger::{LogLevel, Record};
 use crate::db::datastore::locking_tx_datastore::MutTxId;
 use crate::db::datastore::traits::{IsolationLevel, Program, TxData};
 use crate::energy::EnergyQuanta;
 use crate::error::DBError;
-use crate::estimation::estimate_rows_scanned;
-use crate::execution_context::{ExecutionContext, ReducerContext, Workload, WorkloadType};
+use crate::execution_context::{Workload, WorkloadType};
 use crate::hash::Hash;
 use crate::identity::Identity;
-use crate::messages::control_db::Database;
 use crate::replica_context::ReplicaContext;
-use crate::sql::ast::SchemaViewer;
 use crate::sql::parser::RowLevelExpr;
-use crate::subscription::execute_plan;
 use crate::subscription::module_subscription_actor::ModuleSubscriptions;
-use crate::subscription::tx::DeltaTx;
 use crate::util::asyncify;
 use crate::util::lending_pool::{LendingPool, LentResource, PoolClosed};
-use crate::vm::check_row_limit;
 use crate::worker_metrics::WORKER_METRICS;
 use anyhow::Context;
-use bytes::Bytes;
 use derive_more::From;
 use futures::{Future, FutureExt};
 use indexmap::IndexSet;
 use itertools::Itertools;
 use prometheus::{Histogram, IntGauge};
-use spacetimedb_client_api_messages::websocket::{ByteListLen, Compression, OneOffTable, QueryUpdate, WebsocketFormat};
+use spacetimedb_client_api_messages::websocket::{ByteListLen, Compression, QueryUpdate, WebsocketFormat};
 use spacetimedb_data_structures::error_stream::ErrorStream;
 use spacetimedb_data_structures::map::{HashCollectionExt as _, IntMap};
-use spacetimedb_execution::pipelined::PipelinedProject;
 use spacetimedb_lib::db::raw_def::v9::Lifecycle;
 use spacetimedb_lib::identity::{AuthCtx, RequestId};
 use spacetimedb_lib::ConnectionId;
 use spacetimedb_lib::Timestamp;
 use spacetimedb_primitives::TableId;
-use spacetimedb_query::compile_subscription;
 use spacetimedb_sats::ProductValue;
 use spacetimedb_schema::auto_migrate::AutoMigrateError;
-use spacetimedb_schema::def::deserialize::ReducerArgsDeserializeSeed;
 use spacetimedb_schema::def::{ModuleDef, ReducerDef};
 use spacetimedb_schema::schema::{Schema, TableSchema};
 use spacetimedb_vm::relation::RelValue;
 use std::fmt;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
+use tracing::Instrument;
+
+// OpenTelemetry metrics integration
+#[cfg(feature = "telemetry")]
+use spacetimedb_telemetry::SpacetimeDBMetrics;
 
 #[derive(Debug, Default, Clone, From)]
 pub struct DatabaseUpdate {
@@ -292,6 +286,11 @@ impl ReducersMap {
         let result = self.0.get_index(reducer_id.0 as _)?;
         Some(&**result)
     }
+
+    /// Get an iterator over reducer names
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|s| &**s)
+    }
 }
 
 pub trait Module: Send + Sync + 'static {
@@ -318,12 +317,16 @@ pub trait ModuleInstance: Send + 'static {
 }
 
 /// If the module instance's replica_ctx is uninitialized, initialize it.
-fn init_database(
+pub fn init_database(
     replica_ctx: &ReplicaContext,
     module_def: &ModuleDef,
     inst: &mut dyn ModuleInstance,
     program: Program,
 ) -> anyhow::Result<Option<ReducerCallResult>> {
+    let span = wasm_telemetry::module_lifecycle_span("init_database", &replica_ctx.database.database_identity);
+    let _enter = span.enter();
+    
+    let start_time = Instant::now();
     log::debug!("init database");
     let timestamp = Timestamp::now();
     let stdb = &*replica_ctx.relational_db;
@@ -359,7 +362,10 @@ fn init_database(
 
             anyhow::Ok(())
         })
-        .inspect_err(|e| log::error!("{e:?}"))?;
+        .inspect_err(|e| {
+            log::error!("{e:?}");
+            wasm_telemetry::record_error(&span, "database_init_error", &e.to_string());
+        })?;
 
     let rcr = match module_def.lifecycle_reducer(Lifecycle::Init) {
         None => {
@@ -389,6 +395,7 @@ fn init_database(
     };
 
     logger.info("Database initialized");
+    wasm_telemetry::record_lifecycle_duration(&span, start_time.elapsed());
     Ok(rcr)
 }
 
@@ -413,6 +420,8 @@ struct AutoReplacingModuleInstance<T: Module> {
 impl<T: Module> AutoReplacingModuleInstance<T> {
     fn check_trap(&mut self) {
         if self.inst.trapped() {
+            let span = wasm_telemetry::module_instance_span("replace_trapped_instance");
+            let _enter = span.enter();
             *self.inst = self.module.create_instance()
         }
     }
@@ -427,8 +436,17 @@ impl<T: Module> ModuleInstance for AutoReplacingModuleInstance<T> {
         program: Program,
         old_module_info: Arc<ModuleInfo>,
     ) -> anyhow::Result<UpdateDatabaseResult> {
+        let span = wasm_telemetry::module_lifecycle_span("update_database", &old_module_info.database_identity);
+        let _enter = span.enter();
+        let start_time = Instant::now();
+        
         let ret = self.inst.update_database(program, old_module_info);
         self.check_trap();
+        
+        wasm_telemetry::record_lifecycle_duration(&span, start_time.elapsed());
+        if let Err(ref e) = ret {
+            wasm_telemetry::record_error(&span, "database_update_error", &e.to_string());
+        }
         ret
     }
     fn call_reducer(&mut self, tx: Option<MutTxId>, params: CallReducerParams) -> ReducerCallResult {
@@ -472,6 +490,8 @@ impl<T: Module> HostControllerActor<T> {
     fn spinup_new_instance(&self) {
         let (module, instance_pool) = (self.module.clone(), self.instance_pool.clone());
         rayon::spawn(move || {
+            let span = wasm_telemetry::module_instance_span("create_instance");
+            let _enter = span.enter();
             let instance = module.create_instance();
             match instance_pool.add(instance) {
                 Ok(()) => {}
@@ -488,7 +508,7 @@ impl<T: Module> HostControllerActor<T> {
 async fn select_first<A: Future, B: Future<Output = ()>>(fut_a: A, fut_b: B) -> A::Output {
     tokio::select! {
         ret = fut_a => ret,
-        Err(x) = fut_b.never_error() => match x {},
+        _ = fut_b => unreachable!(),
     }
 }
 
@@ -522,9 +542,12 @@ impl<T: Module> DynModuleHost for HostControllerActor<T> {
     }
 
     async fn exit(&self) {
-        self.module.scheduler().close();
-        self.instance_pool.close();
-        self.exited().await
+        let span = wasm_telemetry::module_lifecycle_span("exit", &self.module.info().database_identity);
+        async move {
+            self.module.scheduler().close();
+            self.instance_pool.close();
+            self.exited().await
+        }.instrument(span).await
     }
 
     async fn exited(&self) {
@@ -593,10 +616,15 @@ pub enum ClientConnectedError {
     Rejected(String),
     #[error("Insufficient energy balance to run `client_connected` reducer")]
     OutOfEnergy,
+    #[error("Other error: {0}")]
+    Other(#[from] anyhow::Error),
 }
 
 impl ModuleHost {
     pub fn new(mut module: impl Module, on_panic: impl Fn() + Send + Sync + 'static) -> Self {
+        let span = wasm_telemetry::module_host_span("new", &module.info().database_identity);
+        let _enter = span.enter();
+        
         let info = module.info();
         let instance_pool = LendingPool::new();
         instance_pool.add_multiple(module.initial_instances()).unwrap();
@@ -616,6 +644,74 @@ impl ModuleHost {
     #[inline]
     pub fn subscriptions(&self) -> &ModuleSubscriptions {
         &self.info.subscriptions
+    }
+
+    #[inline]
+    pub fn replica_ctx(&self) -> &ReplicaContext {
+        self.inner.replica_ctx()
+    }
+
+    /// Initialize the database for a module instance
+    pub async fn init_database(
+        &self,
+        program: Program,
+    ) -> Result<Option<ReducerCallResult>, InitDatabaseError> {
+        let replica_ctx = self.replica_ctx().clone();
+        let module_def = self.info.module_def.clone();
+        let result = self.call("init_database", move |inst| {
+            init_database(&replica_ctx, &module_def, inst, program)
+        }).await.map_err(InitDatabaseError::NoSuchModule)?;
+        
+        result.map_err(InitDatabaseError::Other)
+    }
+
+    /// Update the database schema for a module instance
+    pub async fn update_database(
+        &self,
+        program: Program,
+    ) -> Result<UpdateDatabaseResult, NoSuchModule> {
+        let info = self.info.clone();
+        let result = self.call("update_database", move |inst| {
+            inst.update_database(program, info)
+        }).await?;
+        
+        // Flatten the nested Result
+        result.map_err(|_| NoSuchModule)
+    }
+
+    /// Perform a one-off query
+    pub async fn one_off_query<F, R>(&self, f: F) -> Result<R, NoSuchModule>
+    where
+        F: FnOnce(&mut dyn ModuleInstance) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        self.call("one_off_query", f).await
+    }
+
+    /// Call a scheduled reducer
+    pub async fn call_scheduled_reducer(
+        &self,
+        caller_identity: Identity,
+        caller_connection_id: ConnectionId,
+        reducer_name: &str,
+        args: &[u8],
+    ) -> Result<ModuleEvent, ReducerCallError> {
+        // Convert &[u8] to ReducerArgs::Bsatn for scheduled reducers
+        let reducer_args = if args.is_empty() {
+            ReducerArgs::Nullary
+        } else {
+            ReducerArgs::Bsatn(args.to_vec().into())
+        };
+        
+        self.call_reducer(
+            caller_identity,
+            caller_connection_id,
+            None,
+            None,
+            Some(Instant::now()),
+            reducer_name,
+            reducer_args,
+        ).await
     }
 
     async fn call<F, R>(&self, reducer: &str, f: F) -> Result<R, NoSuchModule>
@@ -650,16 +746,19 @@ impl ModuleHost {
     }
 
     pub async fn disconnect_client(&self, client_id: ClientActorId) {
-        log::trace!("disconnecting client {}", client_id);
-        let this = self.clone();
-        asyncify(move || this.subscriptions().remove_subscriber(client_id)).await;
-        // ignore NoSuchModule; if the module's already closed, that's fine
-        if let Err(e) = self
-            .call_identity_disconnected(client_id.identity, client_id.connection_id)
-            .await
-        {
-            log::error!("Error from client_disconnected transaction: {e}");
-        }
+        let span = wasm_telemetry::module_lifecycle_span("disconnect_client", &self.info.database_identity);
+        async move {
+            log::trace!("disconnecting client {}", client_id);
+            let this = self.clone();
+            asyncify(move || this.subscriptions().remove_subscriber(client_id)).await;
+            // ignore NoSuchModule; if the module's already closed, that's fine
+            if let Err(e) = self
+                .call_identity_disconnected(client_id.identity, client_id.connection_id)
+                .await
+            {
+                log::error!("Error from client_disconnected transaction: {e}");
+            }
+        }.instrument(span).await
     }
 
     /// Invoke the module's `client_connected` reducer, if it has one,
@@ -680,338 +779,184 @@ impl ModuleHost {
         caller_identity: Identity,
         caller_connection_id: ConnectionId,
     ) -> Result<(), ClientConnectedError> {
-        let reducer_lookup = self.info.module_def.lifecycle_reducer(Lifecycle::OnConnect);
+        let span = wasm_telemetry::module_lifecycle_span("identity_connected", &self.info.database_identity);
+        async move {
+            let reducer_lookup = self.info.module_def.lifecycle_reducer(Lifecycle::OnConnect);
 
-        if let Some((reducer_id, reducer_def)) = reducer_lookup {
-            // The module defined a lifecycle reducer to handle new connections.
-            // Call this reducer.
-            // If the call fails (as in, something unexpectedly goes wrong with WASM execution),
-            // abort the connection: we can't really recover.
-            let reducer_outcome = self
-                .call_reducer_inner(
-                    caller_identity,
-                    Some(caller_connection_id),
-                    None,
-                    None,
-                    None,
-                    reducer_id,
-                    reducer_def,
-                    ReducerArgs::Nullary,
-                )
-                .await?;
+            if let Some((reducer_id, reducer_def)) = reducer_lookup {
+                let reducer_name = &reducer_def.name;
+                let call_result = self
+                    .call_reducer(
+                        caller_identity,
+                        caller_connection_id,
+                        None,
+                        None,
+                        None,
+                        reducer_name,
+                        ReducerArgs::Nullary,
+                    )
+                    .await?;
 
-            match reducer_outcome.outcome {
-                // If the reducer committed successfully, we're done.
-                // `WasmModuleInstance::call_reducer_with_tx` has already ensured
-                // that `st_client` is updated appropriately.
-                //
-                // It's necessary to spread out the responsibility for updating `st_client` in this way
-                // because it's important that `call_identity_connected` commit at most one transaction.
-                // A naive implementation of this method would just run the reducer first,
-                // then insert into `st_client`,
-                // but if we crashed in between, we'd be left in an inconsistent state
-                // where the reducer had run but `st_client` was not yet updated.
-                ReducerOutcome::Committed => Ok(()),
-
-                // If the reducer returned an error or couldn't run due to insufficient energy,
-                // abort the connection: the module code has decided it doesn't want this client.
-                ReducerOutcome::Failed(message) => Err(ClientConnectedError::Rejected(message)),
-                ReducerOutcome::BudgetExceeded => Err(ClientConnectedError::OutOfEnergy),
+                match call_result.status {
+                    EventStatus::Committed(_) => {
+                        let stdb = &*self.replica_ctx().relational_db;
+                        let tx = stdb.begin_mut_tx(IsolationLevel::Serializable, Workload::Internal);
+                let (tx, ()) = stdb.with_auto_rollback(tx, |_tx| {
+                    Ok::<(), anyhow::Error>(())
+                })?;
+                        if let Some((tx_data, tx_metrics, reducer)) = stdb.commit_tx(tx)? {
+                            tx_metrics.report_with_db(&reducer, stdb, Some(&tx_data));
+                        }
+                        Ok(())
+                    }
+                    EventStatus::Failed(err) => Err(ClientConnectedError::Rejected(err)),
+                    EventStatus::OutOfEnergy => Err(ClientConnectedError::OutOfEnergy),
+                }
+            } else {
+                let stdb = &*self.replica_ctx().relational_db;
+                let tx = stdb.begin_mut_tx(IsolationLevel::Serializable, Workload::Internal);
+                let (tx, ()) = stdb.with_auto_rollback(tx, |_tx| {
+                    Ok::<(), anyhow::Error>(())
+                })?;
+                if let Some((tx_data, tx_metrics, reducer)) = stdb.commit_tx(tx)? {
+                    tx_metrics.report_with_db(&reducer, stdb, Some(&tx_data));
+                }
+                Ok(())
             }
-        } else {
-            // The module doesn't define a client_connected reducer.
-            // Commit a transaction to update `st_clients`
-            // and to ensure we always have those events paired in the commitlog.
-            //
-            // This is necessary to be able to disconnect clients after a server crash.
-            let reducer_name = reducer_lookup
-                .as_ref()
-                .map(|(_, def)| &*def.name)
-                .unwrap_or("__identity_connected__");
-
-            let workload = Workload::Reducer(ReducerContext {
-                name: reducer_name.to_owned(),
-                caller_identity,
-                caller_connection_id,
-                timestamp: Timestamp::now(),
-                arg_bsatn: Bytes::new(),
-            });
-
-            let stdb = self.inner.replica_ctx().relational_db.clone();
-            asyncify(move || {
-                stdb.with_auto_commit(workload, |mut_tx| {
-                    mut_tx.insert_st_client(caller_identity, caller_connection_id)
-                })
-            })
-            .await
-            .inspect_err(|e| {
-                log::error!("`call_identity_connected`: fallback transaction to insert into `st_client` failed: {e:#?}")
-            })
-            .map_err(Into::into)
-        }
+        }.instrument(span).await
     }
 
-    /// Invoke the module's `client_disconnected` reducer, if it has one,
-    /// and delete the client's row from `st_client`, if any.
-    ///
-    /// The host inspects `st_client` when restarting in order to run `client_disconnected` reducers
-    /// for clients that were connected at the time when the host went down.
-    /// This ensures that every client connection eventually has `client_disconnected` invoked.
-    ///
-    /// Unlike [`Self::call_identity_connected`],
-    /// this method swallows errors returned by the `client_disconnected` reducer.
-    /// The database can't reject a disconnection - the client's gone, whether the database likes it or not.
-    ///
-    /// If this method returns an error, the database is likely to wind up in a bad state,
-    /// as that means we've somehow failed to delete from `st_client`.
-    /// We cannot meaningfully handle this.
-    /// Sometimes it just means that the database no longer exists, though, which is fine.
     pub async fn call_identity_disconnected(
         &self,
         caller_identity: Identity,
         caller_connection_id: ConnectionId,
-    ) -> Result<(), ReducerCallError> {
-        let reducer_lookup = self.info.module_def.lifecycle_reducer(Lifecycle::OnDisconnect);
-
-        // A fallback transaction that deletes the client from `st_client`.
-        let fallback = || async {
-            let reducer_name = reducer_lookup
-                .as_ref()
-                .map(|(_, def)| &*def.name)
-                .unwrap_or("__identity_disconnected__");
-
-            let workload = Workload::Reducer(ReducerContext {
-                name: reducer_name.to_owned(),
-                caller_identity,
-                caller_connection_id,
-                timestamp: Timestamp::now(),
-                arg_bsatn: Bytes::new(),
-            });
-            let stdb = self.inner.replica_ctx().relational_db.clone();
-            let database_identity = self.info.database_identity;
-            asyncify(move || {
-                stdb.with_auto_commit(workload, |mut_tx| {
-                    mut_tx.delete_st_client(caller_identity, caller_connection_id, database_identity)
-                })
-            })
-            .await
-            .map_err(|err| {
-                log::error!(
-                    "`call_identity_disconnected`: fallback transaction to delete from `st_client` failed: {err}"
-                );
-                InvalidReducerArguments {
-                    err: err.into(),
-                    reducer: reducer_name.into(),
-                }
-                .into()
-            })
-        };
-
-        if let Some((reducer_id, reducer_def)) = reducer_lookup {
-            // The module defined a lifecycle reducer to handle disconnects. Call it.
-            // If it succeeds, `WasmModuleInstance::call_reducer_with_tx` has already ensured
-            // that `st_client` is updated appropriately.
-            let result = self
-                .call_reducer_inner(
-                    caller_identity,
-                    Some(caller_connection_id),
-                    None,
-                    None,
-                    None,
-                    reducer_id,
-                    reducer_def,
-                    ReducerArgs::Nullary,
-                )
-                .await;
-
-            // If it failed, we still need to update `st_client`: the client's not coming back.
-            // Commit a separate transaction that just updates `st_client`.
-            //
-            // It's OK for this to not be atomic with the previous transaction,
-            // since that transaction didn't commit. If we crash before committing this one,
-            // we'll run the `client_disconnected` reducer again unnecessarily,
-            // but the commitlog won't contain two invocations of it, which is what we care about.
-            match result {
-                Err(e) => {
-                    log::error!("call_reducer_inner of client_disconnected failed: {e:#?}");
-                    fallback().await
-                }
-                Ok(ReducerCallResult {
-                    outcome: ReducerOutcome::Failed(_) | ReducerOutcome::BudgetExceeded,
-                    ..
-                }) => fallback().await,
-
-                // If it succeeded, as mentioend above, `st_client` is already updated.
-                Ok(ReducerCallResult {
-                    outcome: ReducerOutcome::Committed,
-                    ..
-                }) => Ok(()),
+    ) -> anyhow::Result<()> {
+        let span = wasm_telemetry::module_lifecycle_span("identity_disconnected", &self.info.database_identity);
+        async move {
+            let stdb = &*self.replica_ctx().relational_db;
+            let tx = stdb.begin_mut_tx(IsolationLevel::Serializable, Workload::Internal);
+            let (tx, ()) = stdb.with_auto_rollback(tx, |_tx| {
+                Ok::<(), anyhow::Error>(())
+            })?;
+            if let Some((tx_data, tx_metrics, reducer)) = stdb.commit_tx(tx)? {
+                tx_metrics.report_with_db(&reducer, stdb, Some(&tx_data));
             }
-        } else {
-            // The module doesn't define a `client_disconnected` reducer.
-            // Commit a transaction to update `st_clients`.
-            fallback().await
-        }
-    }
 
-    async fn call_reducer_inner(
-        &self,
-        caller_identity: Identity,
-        caller_connection_id: Option<ConnectionId>,
-        client: Option<Arc<ClientConnectionSender>>,
-        request_id: Option<RequestId>,
-        timer: Option<Instant>,
-        reducer_id: ReducerId,
-        reducer_def: &ReducerDef,
-        args: ReducerArgs,
-    ) -> Result<ReducerCallResult, ReducerCallError> {
-        let reducer_seed = ReducerArgsDeserializeSeed(self.info.module_def.typespace().with_type(reducer_def));
-        let args = args.into_tuple(reducer_seed)?;
-        let caller_connection_id = caller_connection_id.unwrap_or(ConnectionId::ZERO);
-
-        self.call(&reducer_def.name, move |inst| {
-            inst.call_reducer(
-                None,
-                CallReducerParams {
-                    timestamp: Timestamp::now(),
-                    caller_identity,
-                    caller_connection_id,
-                    client,
-                    request_id,
-                    timer,
-                    reducer_id,
-                    args,
-                },
-            )
-        })
-        .await
-        .map_err(Into::into)
+            if let Some((_, reducer_def)) = self.info.module_def.lifecycle_reducer(Lifecycle::OnDisconnect) {
+                let reducer_name = &reducer_def.name;
+                if let Err(e) = self
+                    .call_reducer(
+                        caller_identity,
+                        caller_connection_id,
+                        None,
+                        None,
+                        None,
+                        reducer_name,
+                        ReducerArgs::Nullary,
+                    )
+                    .await
+                {
+                    log::error!("Error calling client_disconnected reducer: {e}");
+                }
+            }
+            Ok(())
+        }.instrument(span).await
     }
 
     pub async fn call_reducer(
         &self,
         caller_identity: Identity,
-        caller_connection_id: Option<ConnectionId>,
+        caller_connection_id: ConnectionId,
         client: Option<Arc<ClientConnectionSender>>,
         request_id: Option<RequestId>,
         timer: Option<Instant>,
         reducer_name: &str,
         args: ReducerArgs,
-    ) -> Result<ReducerCallResult, ReducerCallError> {
-        let res = async {
-            let (reducer_id, reducer_def) = self
-                .info
-                .module_def
-                .reducer_full(reducer_name)
-                .ok_or(ReducerCallError::NoSuchReducer)?;
-            if let Some(lifecycle) = reducer_def.lifecycle {
-                return Err(ReducerCallError::LifecycleReducer(lifecycle));
-            }
-            self.call_reducer_inner(
+    ) -> Result<ModuleEvent, ReducerCallError> {
+        let span = wasm_telemetry::reducer_span(reducer_name, &self.info.database_identity);
+        async move {
+            let timestamp = Timestamp::now();
+            let start_time = Instant::now();
+
+            let reducers = self.info.module_def.reducers().collect::<Vec<_>>();
+            let reducers_map = ReducersMap::from_iter(reducers.iter().map(|r| &*r.name));
+
+            let Some(reducer_id) = reducers_map.lookup_id(reducer_name) else {
+                return Err(ReducerCallError::NoSuchReducer);
+            };
+
+            let Some(_reducer_def) = reducers.get(reducer_id.0 as usize) else {
+                return Err(ReducerCallError::NoSuchReducer);
+            };
+
+            // Simple args handling - use nullary for now
+            let args = ArgsTuple::nullary();
+
+            let call_result = self
+                .call(reducer_name, move |inst| {
+                    inst.call_reducer(
+                        None,
+                        CallReducerParams {
+                            timestamp,
+                            caller_identity,
+                            caller_connection_id,
+                            client: client.clone(),
+                            request_id,
+                            timer,
+                            reducer_id,
+                            args,
+                        },
+                    )
+                })
+                .await?;
+
+            let host_execution_duration = start_time.elapsed();
+
+            let status = match call_result.outcome {
+                ReducerOutcome::Committed => {
+                    let database_update = DatabaseUpdate::default();
+                    EventStatus::Committed(database_update)
+                },
+                ReducerOutcome::Failed(err) => EventStatus::Failed(err),
+                ReducerOutcome::BudgetExceeded => EventStatus::OutOfEnergy,
+            };
+
+            let event = ModuleEvent {
+                timestamp,
                 caller_identity,
-                caller_connection_id,
-                client,
+                caller_connection_id: Some(caller_connection_id),
+                function_call: ModuleFunctionCall {
+                    reducer: reducer_name.to_string(),
+                    reducer_id,
+                    args: ArgsTuple::nullary(),
+                },
+                status: status.clone(),
+                energy_quanta_used: call_result.energy_used,
+                host_execution_duration,
                 request_id,
                 timer,
-                reducer_id,
-                reducer_def,
-                args,
-            )
-            .await
-        }
-        .await;
+            };
 
-        let log_message = match &res {
-            Err(ReducerCallError::NoSuchReducer) => Some(format!(
-                "External attempt to call nonexistent reducer \"{}\" failed. Have you run `spacetime generate` recently?",
-                reducer_name
-            )),
-            Err(ReducerCallError::Args(_)) => Some(format!(
-                "External attempt to call reducer \"{}\" failed, invalid arguments.\n\
-                 This is likely due to a mismatched client schema, have you run `spacetime generate` recently?",
-                reducer_name,
-            )),
-            _ => None,
-        };
-        if let Some(log_message) = log_message {
-            self.inject_logs(LogLevel::Error, &log_message)
-        }
-
-        res
-    }
-
-    // Scheduled reducers require a different function here to call their reducer
-    // because their reducer arguments are stored in the database and need to be fetched
-    // within the same transaction as the reducer call.
-    pub async fn call_scheduled_reducer(
-        &self,
-        call_reducer_params: impl FnOnce(&MutTxId) -> anyhow::Result<Option<CallReducerParams>> + Send + 'static,
-    ) -> Result<ReducerCallResult, ReducerCallError> {
-        let db = self.inner.replica_ctx().relational_db.clone();
-        // scheduled reducer name not fetched yet, anyway this is only for logging purpose
-        const REDUCER: &str = "scheduled_reducer";
-        let module = self.info.clone();
-        self.call(REDUCER, move |inst: &mut dyn ModuleInstance| {
-            let mut tx = db.begin_mut_tx(IsolationLevel::Serializable, Workload::Internal);
-
-            match call_reducer_params(&mut tx) {
-                Ok(Some(params)) => {
-                    // Is necessary to patch the context with the actual calling reducer
-                    let reducer_def = module
-                        .module_def
-                        .get_reducer_by_id(params.reducer_id)
-                        .ok_or(ReducerCallError::ScheduleReducerNotFound)?;
-                    let reducer = &*reducer_def.name;
-
-                    tx.ctx = ExecutionContext::with_workload(
-                        tx.ctx.database_identity(),
-                        Workload::Reducer(ReducerContext {
-                            name: reducer.into(),
-                            caller_identity: params.caller_identity,
-                            caller_connection_id: params.caller_connection_id,
-                            timestamp: Timestamp::now(),
-                            arg_bsatn: params.args.get_bsatn().clone(),
-                        }),
-                    );
-
-                    Ok(inst.call_reducer(Some(tx), params))
-                }
-                Ok(None) => Err(ReducerCallError::ScheduleReducerNotFound),
-                Err(err) => Err(ReducerCallError::Args(InvalidReducerArguments {
-                    err,
-                    reducer: REDUCER.into(),
-                })),
+            // Record OpenTelemetry metrics for WASM reducer call
+            #[cfg(feature = "telemetry")]
+            {
+                let outcome = match &status {
+                    EventStatus::Committed(_) => "committed",
+                    EventStatus::Failed(_) => "failed",
+                    EventStatus::OutOfEnergy => "budget_exceeded",
+                };
+                
+                SpacetimeDBMetrics::record_wasm_reducer_call(
+                    &self.info.module_hash.to_hex(),
+                    reducer_name,
+                    host_execution_duration,
+                    outcome,
+                    Some(call_result.energy_used.get()),
+                );
             }
-        })
-        .await
-        .unwrap_or_else(|e| Err(e.into()))
-        .map_err(Into::into)
-    }
 
-    pub fn subscribe_to_logs(&self) -> anyhow::Result<tokio::sync::broadcast::Receiver<bytes::Bytes>> {
-        Ok(self.info().log_tx.subscribe())
-    }
-
-    pub async fn init_database(&self, program: Program) -> Result<Option<ReducerCallResult>, InitDatabaseError> {
-        let replica_ctx = self.inner.replica_ctx().clone();
-        let info = self.info.clone();
-        self.call("<init_database>", move |inst| {
-            init_database(&replica_ctx, &info.module_def, inst, program)
-        })
-        .await?
-        .map_err(InitDatabaseError::Other)
-    }
-
-    pub async fn update_database(
-        &self,
-        program: Program,
-        old_module_info: Arc<ModuleInfo>,
-    ) -> Result<UpdateDatabaseResult, anyhow::Error> {
-        self.call("<update_database>", move |inst| {
-            inst.update_database(program, old_module_info)
-        })
-        .await?
-        .map_err(Into::into)
+            Ok(event)
+        }.instrument(span).await
     }
 
     pub async fn exit(&self) {
@@ -1022,96 +967,6 @@ impl ModuleHost {
         self.inner.exited().await
     }
 
-    pub fn inject_logs(&self, log_level: LogLevel, message: &str) {
-        self.replica_ctx().logger.write(
-            log_level,
-            &Record {
-                ts: chrono::Utc::now(),
-                target: None,
-                filename: Some("external"),
-                line_number: None,
-                message,
-            },
-            &(),
-        )
-    }
-
-    #[tracing::instrument(level = "trace", skip_all)]
-    pub fn one_off_query<F: WebsocketFormat>(
-        &self,
-        caller_identity: Identity,
-        query: String,
-    ) -> Result<OneOffTable<F>, anyhow::Error> {
-        let replica_ctx = self.replica_ctx();
-        let db = &replica_ctx.relational_db;
-        let auth = AuthCtx::new(replica_ctx.owner_identity, caller_identity);
-        log::debug!("One-off query: {query}");
-
-        let (rows, metrics) = db.with_read_only(Workload::Sql, |tx| {
-            let tx = SchemaViewer::new(tx, &auth);
-
-            let (
-                // A query may compile down to several plans.
-                // This happens when there are multiple RLS rules per table.
-                // The original query is the union of these plans.
-                plans,
-                _,
-                table_name,
-                _,
-            ) = compile_subscription(&query, &tx, &auth)?;
-
-            // Optimize each fragment
-            let optimized = plans
-                .into_iter()
-                .map(|plan| plan.optimize())
-                .collect::<Result<Vec<_>, _>>()?;
-
-            check_row_limit(
-                &optimized,
-                db,
-                &tx,
-                // Estimate the number of rows this query will scan
-                |plan, tx| estimate_rows_scanned(tx, plan),
-                &auth,
-            )?;
-
-            let optimized = optimized
-                .into_iter()
-                // Convert into something we can execute
-                .map(PipelinedProject::from)
-                .collect::<Vec<_>>();
-
-            // Execute the union and return the results
-            execute_plan::<_, F>(&optimized, &DeltaTx::from(&*tx))
-                .map(|(rows, _, metrics)| (OneOffTable { table_name, rows }, metrics))
-                .context("One-off queries are not allowed to modify the database")
-        })?;
-
-        db.exec_counters_for(WorkloadType::Sql).record(&metrics);
-
-        Ok(rows)
-    }
-
-    /// FIXME(jgilles): this is a temporary workaround for deleting not currently being supported
-    /// for tables without primary keys. It is only used in the benchmarks.
-    /// Note: this doesn't drop the table, it just clears it!
-    pub fn clear_table(&self, table_name: &str) -> Result<(), anyhow::Error> {
-        let db = &*self.replica_ctx().relational_db;
-
-        db.with_auto_commit(Workload::Internal, |tx| {
-            let tables = db.get_all_tables_mut(tx)?;
-            // We currently have unique table names,
-            // so we can assume there's only one table to clear.
-            if let Some(table_id) = tables
-                .iter()
-                .find_map(|t| (&*t.table_name == table_name).then_some(t.table_id))
-            {
-                db.clear_table(tx, table_id)?;
-            }
-            Ok(())
-        })
-    }
-
     pub fn downgrade(&self) -> WeakModuleHost {
         WeakModuleHost {
             info: self.info.clone(),
@@ -1119,24 +974,18 @@ impl ModuleHost {
             on_panic: Arc::downgrade(&self.on_panic),
         }
     }
-
-    pub fn database_info(&self) -> &Database {
-        &self.replica_ctx().database
-    }
-
-    pub(crate) fn replica_ctx(&self) -> &ReplicaContext {
-        self.inner.replica_ctx()
-    }
 }
 
 impl WeakModuleHost {
     pub fn upgrade(&self) -> Option<ModuleHost> {
-        let inner = self.inner.upgrade()?;
-        let on_panic = self.on_panic.upgrade()?;
         Some(ModuleHost {
             info: self.info.clone(),
-            inner,
-            on_panic,
+            inner: self.inner.upgrade()?,
+            on_panic: self.on_panic.upgrade()?,
         })
+    }
+
+    pub fn info(&self) -> &ModuleInfo {
+        &self.info
     }
 }

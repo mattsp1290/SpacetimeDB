@@ -20,6 +20,7 @@ members = [
   "crates/paths",
   "crates/physical-plan",
   "crates/primitives",
+  "crates/python-bridge",
   "crates/query",
   "crates/sats",
   "crates/schema",
@@ -30,6 +31,7 @@ members = [
   "crates/standalone",
   "crates/subscription",
   "crates/table",
+  "crates/telemetry",
   "crates/testing",
   "crates/update",
   "crates/vm",
@@ -114,12 +116,14 @@ spacetimedb-metrics = { path = "crates/metrics", version = "1.1.2" }
 spacetimedb-paths = { path = "crates/paths", version = "1.1.2" }
 spacetimedb-physical-plan = { path = "crates/physical-plan", version = "1.1.2" }
 spacetimedb-primitives = { path = "crates/primitives", version = "1.1.2" }
+spacetimedb-python-bridge = { path = "crates/python-bridge", version = "1.1.2" }
 spacetimedb-query = { path = "crates/query", version = "1.1.2" }
 spacetimedb-sats = { path = "crates/sats", version = "1.1.2" }
 spacetimedb-schema = { path = "crates/schema", version = "1.1.2" }
 spacetimedb-standalone = { path = "crates/standalone", version = "1.1.2" }
 spacetimedb-sql-parser = { path = "crates/sql-parser", version = "1.1.2" }
 spacetimedb-table = { path = "crates/table", version = "1.1.2" }
+spacetimedb-telemetry = { path = "crates/telemetry", version = "1.1.2" }
 spacetimedb-vm = { path = "crates/vm", version = "1.1.2" }
 spacetimedb-fs-utils = { path = "crates/fs-utils", version = "1.1.2" }
 spacetimedb-snapshot = { path = "crates/snapshot", version = "1.1.2" }

@@ -107,6 +107,8 @@ pub struct ConfigFile {
     pub certificate_authority: Option<CertificateAuthority>,
     #[serde(default)]
     pub logs: LogConfig,
+    #[serde(default)]
+    pub telemetry: Option<spacetimedb_telemetry::TelemetryConfig>,
 }
 
 impl ConfigFile {

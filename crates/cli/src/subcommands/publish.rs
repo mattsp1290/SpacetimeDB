@@ -8,7 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::config::Config;
-use crate::util::{add_auth_header_opt, get_auth_header, ResponseExt};
+use crate::util::{add_auth_header_opt, get_auth_header, is_local_server, ResponseExt};
 use crate::util::{decode_identity, unauth_error_context, y_or_n};
 use crate::{build, common_args};
 
@@ -88,11 +88,23 @@ pub async fn exec(mut config: Config, args: &ArgMatches) -> Result<(), anyhow::E
     let build_options = args.get_one::<String>("build_options").unwrap();
     let num_replicas = args.get_one::<u8>("num_replicas");
 
+    // Check if we're publishing to a local server
+    let is_local = is_local_server(&database_host);
+    
     // If the user didn't specify an identity and we didn't specify an anonymous identity, then
     // we want to use the default identity
     // TODO(jdetter): We should maybe have some sort of user prompt here for them to be able to
     //  easily create a new identity with an email
-    let auth_header = get_auth_header(&mut config, anon_identity, server, !force).await?;
+    // For local servers, suggest anonymous identity if no auth is configured
+    let mut suggested_anon = anon_identity;
+    if is_local && !anon_identity && config.spacetimedb_token().is_none() && !force {
+        println!("Publishing to local server. Consider using --anon-identity flag for easier local development.");
+        if y_or_n(false, "Would you like to publish anonymously to the local server?")? {
+            suggested_anon = true;
+        }
+    }
+    
+    let auth_header = get_auth_header(&mut config, suggested_anon, server, !force).await?;
 
     let client = reqwest::Client::new();
 
@@ -170,7 +182,7 @@ pub async fn exec(mut config: Config, args: &ArgMatches) -> Result<(), anyhow::E
     builder = add_auth_header_opt(builder, &auth_header);
 
     let res = builder.body(program_bytes).send().await?;
-    if res.status() == StatusCode::UNAUTHORIZED && !anon_identity {
+    if res.status() == StatusCode::UNAUTHORIZED && !suggested_anon {
         // If we're not in the `anon_identity` case, then we have already forced the user to log in above (using `get_auth_header`), so this should be safe to unwrap.
         let token = config.spacetimedb_token().unwrap();
         let identity = decode_identity(token)?;
@@ -200,7 +212,7 @@ pub async fn exec(mut config: Config, args: &ArgMatches) -> Result<(), anyhow::E
             }
         }
         PublishResult::PermissionDenied { name } => {
-            if anon_identity {
+            if suggested_anon {
                 anyhow::bail!("You need to be logged in as the owner of {name} to publish to {name}",);
             }
             // If we're not in the `anon_identity` case, then we have already forced the user to log in above (using `get_auth_header`), so this should be safe to unwrap.

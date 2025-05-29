@@ -12,6 +12,7 @@ use bytestring::ByteString;
 use futures::future::MaybeDone;
 use futures::{Future, FutureExt, SinkExt, StreamExt};
 use http::{HeaderValue, StatusCode};
+use opentelemetry::Context;
 use scopeguard::ScopeGuard;
 use serde::Deserialize;
 use spacetimedb::client::messages::{serialize, IdentityTokenMessage, SerializableMessage};
@@ -22,11 +23,16 @@ use spacetimedb::util::also_poll;
 use spacetimedb::worker_metrics::WORKER_METRICS;
 use spacetimedb_client_api_messages::websocket::{self as ws_api, Compression};
 use spacetimedb_lib::connection_id::{ConnectionId, ConnectionIdForUrl};
+use spacetimedb_telemetry::propagation::{
+    extract_websocket_trace_context, get_trace_id_hex, has_active_span
+};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Utf8Bytes;
+use tracing::Span;
 
 use crate::auth::SpacetimeAuth;
+use crate::telemetry;
 use crate::util::websocket::{
     CloseCode, CloseFrame, Message as WsMessage, WebSocketConfig, WebSocketStream, WebSocketUpgrade,
 };
@@ -68,11 +74,33 @@ pub async fn handle_websocket<S>(
     }): Query<SubscribeQueryParams>,
     forwarded_for: Option<TypedHeader<XForwardedFor>>,
     Extension(auth): Extension<SpacetimeAuth>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> axum::response::Result<impl IntoResponse>
 where
     S: NodeDelegate + ControlStateDelegate,
 {
+    // Extract distributed tracing context from WebSocket upgrade headers
+    let (trace_context, spacetimedb_context) = extract_websocket_trace_context(&headers)
+        .unwrap_or_else(|_| (Context::new(), None));
+    
+    // Create telemetry span for WebSocket connection with distributed tracing
+    let ws_attrs = telemetry::extract_websocket_attributes(
+        format!("pending-{}", generate_random_connection_id()),
+        &headers,
+        None,
+        Some(&auth.identity),
+    );
+    
+    let span = telemetry::create_websocket_span(&ws_attrs);
+    let _enter = span.enter();
+    
+    // Record trace information if available
+    if has_active_span(&trace_context) {
+        if let Some(trace_id) = get_trace_id_hex(&trace_context) {
+            span.record("trace.trace_id", trace_id.as_str());
+        }
+    }
     if connection_id.is_some() {
         // TODO: Bump this up to `log::warn!` after removing the client SDKs' uses of that parameter.
         log::debug!("The connection_id query parameter to the subscribe HTTP endpoint is internal and will be removed in a future version of SpacetimeDB.");
@@ -90,6 +118,9 @@ where
     }
 
     let db_identity = name_or_identity.resolve(&ctx).await?;
+    
+    // Record database identity in the span now that it's resolved
+    span.record("spacetimedb.database_id", &db_identity.to_hex().to_string());
 
     let (res, ws_upgrade, protocol) =
         ws.select_protocol([(BIN_PROTOCOL, Protocol::Binary), (TEXT_PROTOCOL, Protocol::Text)]);
@@ -156,6 +187,10 @@ where
             }
             Err(e @ (ClientConnectedError::DBError(_) | ClientConnectedError::ReducerCall(_))) => {
                 log::warn!("ModuleHost died while we were connecting: {e:#}");
+                return;
+            }
+            Err(ClientConnectedError::Other(e)) => {
+                log::warn!("Other error while connecting: {e:#}");
                 return;
             }
         };

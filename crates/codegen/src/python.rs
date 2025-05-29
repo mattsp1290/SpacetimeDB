@@ -1,4 +1,3 @@
-use crate::indent_scope;
 use crate::util::{is_reducer_invokable, iter_reducers, iter_tables, iter_types, iter_unique_cols};
 
 use super::util::{collect_case, print_auto_generated_file_comment, type_ref_name};
@@ -16,7 +15,6 @@ use spacetimedb_schema::type_for_generate::{AlgebraicTypeDef, AlgebraicTypeUse, 
 
 use super::code_indenter::{CodeIndenter, Indenter};
 use super::Lang;
-use spacetimedb_lib::version::spacetimedb_lib_version;
 
 type Imports = BTreeSet<AlgebraicTypeRef>;
 
@@ -440,7 +438,7 @@ fn define_sum_type(
 }
 
 fn define_enum_type(
-    module: &ModuleDef,
+    _module: &ModuleDef,
     out: &mut Indenter,
     name: &str,
     variants: &[(Identifier, AlgebraicTypeUse)],

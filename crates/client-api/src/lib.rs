@@ -19,6 +19,7 @@ use tokio::sync::watch;
 
 pub mod auth;
 pub mod routes;
+pub mod telemetry;
 pub mod util;
 
 /// Defines the state / environment of a SpacetimeDB node from the PoV of the

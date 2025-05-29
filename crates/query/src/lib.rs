@@ -16,6 +16,7 @@ use spacetimedb_physical_plan::{
     plan::{ProjectListPlan, ProjectPlan},
 };
 use spacetimedb_primitives::TableId;
+use tracing::{debug_span, info_span};
 
 /// DIRTY HACK ALERT: Maximum allowed length, in UTF-8 bytes, of SQL queries.
 /// Any query longer than this will be rejected.
@@ -52,6 +53,15 @@ pub fn compile_subscription(
 
 /// A utility for parsing and type checking a sql statement
 pub fn compile_sql_stmt(sql: &str, tx: &impl SchemaView, auth: &AuthCtx) -> Result<Statement> {
+    let span = debug_span!(
+        "db.query.compile",
+        db.system = "spacetimedb",
+        db.operation = "compile",
+        db.statement = %sql,
+        spacetimedb.query_length = sql.len(),
+    );
+    let _enter = span.enter();
+
     if sql.len() > MAX_SQL_LENGTH {
         bail!("SQL query exceeds maximum allowed length: \"{sql:.120}...\"")
     }
@@ -69,6 +79,14 @@ pub fn execute_select_stmt<Tx: Datastore + DeltaStore>(
     metrics: &mut ExecutionMetrics,
     check_row_limit: impl Fn(ProjectListPlan) -> Result<ProjectListPlan>,
 ) -> Result<Vec<ProductValue>> {
+    let span = info_span!(
+        "db.query.execute_select",
+        db.system = "spacetimedb",
+        db.operation = "select",
+        spacetimedb.rows_returned = tracing::field::Empty,
+    );
+    let _enter = span.enter();
+
     let plan = compile_select_list(stmt).optimize()?;
     let plan = check_row_limit(plan)?;
     let plan = ProjectListExecutor::from(plan);
@@ -77,11 +95,24 @@ pub fn execute_select_stmt<Tx: Datastore + DeltaStore>(
         rows.push(row);
         Ok(())
     })?;
+    
+    span.record("spacetimedb.rows_returned", rows.len());
     Ok(rows)
 }
 
 /// A utility for executing a sql dml statement
 pub fn execute_dml_stmt<Tx: MutDatastore>(stmt: DML, tx: &mut Tx, metrics: &mut ExecutionMetrics) -> Result<()> {
+    let span = info_span!(
+        "db.query.execute_dml",
+        db.system = "spacetimedb",
+        db.operation = match &stmt {
+            DML::Insert(_) => "insert",
+            DML::Update(_) => "update",
+            DML::Delete(_) => "delete",
+        },
+    );
+    let _enter = span.enter();
+
     let plan = compile_dml_plan(stmt).optimize()?;
     let plan = MutExecutor::from(plan);
     plan.execute(tx, metrics)

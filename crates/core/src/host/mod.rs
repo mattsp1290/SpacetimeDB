@@ -19,6 +19,7 @@ pub mod wasmtime;
 // Visible for integration testing.
 pub mod instance_env;
 mod wasm_common;
+pub mod wasm_telemetry;
 
 pub use disk_storage::DiskStorage;
 pub use host_controller::{
@@ -28,7 +29,7 @@ pub use host_controller::{
 pub use module_host::{ModuleHost, NoSuchModule, ReducerCallError, UpdateDatabaseResult};
 pub use scheduler::Scheduler;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ReducerArgs {
     Json(ByteString),
     Bsatn(Bytes),

@@ -23,7 +23,7 @@ use crate::execution_context::Workload;
 
 use super::module_host::ModuleEvent;
 use super::module_host::ModuleFunctionCall;
-use super::module_host::{CallReducerParams, WeakModuleHost};
+use super::module_host::{CallReducerParams, WeakModuleHost, NoSuchModule};
 use super::module_host::{DatabaseUpdate, EventStatus};
 use super::{ModuleHost, ReducerArgs, ReducerCallError};
 
@@ -254,6 +254,7 @@ struct SchedulerActor {
     module_host: WeakModuleHost,
 }
 
+#[derive(Clone)]
 enum QueueItem {
     Id { id: ScheduledReducerId, at: Timestamp },
     VolatileNonatomicImmediate { reducer_name: String, args: ReducerArgs },
@@ -317,68 +318,47 @@ impl SchedulerActor {
         };
         let db = module_host.replica_ctx().relational_db.clone();
         let caller_identity = module_host.info().database_identity;
-        let module_info = module_host.info.clone();
-
-        let call_reducer_params = move |tx: &MutTxId| match item {
-            QueueItem::Id { id, at } => {
-                let Ok(schedule_row) = get_schedule_row_mut(tx, &db, id) else {
-                    // if the row is not found, it means the schedule is cancelled by the user
-                    log::debug!(
-                        "table row corresponding to yeild scheduler id not found: tableid {}, schedulerId {}",
-                        id.table_id,
-                        id.schedule_id
-                    );
-                    return Ok(None);
-                };
-
-                let ScheduledReducer { reducer, bsatn_args } = proccess_schedule(tx, &db, id.table_id, &schedule_row)?;
-
-                let (reducer_id, reducer_seed) = module_info
-                    .module_def
-                    .reducer_arg_deserialize_seed(&reducer[..])
-                    .ok_or_else(|| anyhow!("Reducer not found: {}", reducer))?;
-
-                let reducer_args = ReducerArgs::Bsatn(bsatn_args.into()).into_tuple(reducer_seed)?;
-
-                // the timestamp we tell the reducer it's running at will be
-                // at least the timestamp it was scheduled to run at.
-                let timestamp = at.max(Timestamp::now());
-
-                Ok(Some(CallReducerParams {
-                    timestamp,
-                    caller_identity,
-                    caller_connection_id: ConnectionId::ZERO,
-                    client: None,
-                    request_id: None,
-                    timer: None,
-                    reducer_id,
-                    args: reducer_args,
-                }))
-            }
-            QueueItem::VolatileNonatomicImmediate { reducer_name, args } => {
-                let (reducer_id, reducer_seed) = module_info
-                    .module_def
-                    .reducer_arg_deserialize_seed(&reducer_name[..])
-                    .ok_or_else(|| anyhow!("Reducer not found: {}", reducer_name))?;
-                let reducer_args = args.into_tuple(reducer_seed)?;
-
-                Ok(Some(CallReducerParams {
-                    timestamp: Timestamp::now(),
-                    caller_identity,
-                    caller_connection_id: ConnectionId::ZERO,
-                    client: None,
-                    request_id: None,
-                    timer: None,
-                    reducer_id,
-                    args: reducer_args,
-                }))
-            }
-        };
-
-        let db = module_host.replica_ctx().relational_db.clone();
         let module_host_clone = module_host.clone();
 
-        let res = tokio::spawn(async move { module_host.call_scheduled_reducer(call_reducer_params).await }).await;
+        let res = tokio::spawn({
+            let item_clone = item.clone();
+            let db_clone = db.clone();
+            async move { 
+                // Create a transaction to get the scheduled reducer information
+                let tx = db_clone.begin_mut_tx(IsolationLevel::Serializable, Workload::Internal);
+                
+                match &item_clone {
+                    QueueItem::Id { id, .. } => {
+                        let Ok(schedule_row) = get_schedule_row_mut(&tx, &db_clone, *id) else {
+                            log::debug!("Scheduled reducer row not found: table_id {}, schedule_id {}", id.table_id, id.schedule_id);
+                            return Err(ReducerCallError::ScheduleReducerNotFound);
+                        };
+
+                        let Ok(ScheduledReducer { reducer, bsatn_args }) = proccess_schedule(&tx, &db_clone, id.table_id, &schedule_row) else {
+                            log::error!("Failed to process scheduled reducer for table_id {}", id.table_id);
+                            return Err(ReducerCallError::ScheduleReducerNotFound);
+                        };
+
+                        // Use the reducer name directly
+                        module_host.call_scheduled_reducer(
+                            caller_identity,
+                            ConnectionId::ZERO,
+                            &reducer,
+                            &bsatn_args,
+                        ).await
+                    }
+                    QueueItem::VolatileNonatomicImmediate { reducer_name, .. } => {
+                        // For immediate reducers, use empty args
+                        module_host.call_scheduled_reducer(
+                            caller_identity,
+                            ConnectionId::ZERO,
+                            reducer_name,
+                            &[],
+                        ).await
+                    }
+                }
+            }
+        }).await;
 
         match res {
             // if we didn't actually call the reducer because the module exited or it was already deleted, leave

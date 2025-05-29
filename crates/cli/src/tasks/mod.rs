@@ -4,6 +4,7 @@ use crate::util::{self, ModuleLanguage};
 
 use self::csharp::build_csharp;
 use self::go::build_go;
+use self::python::build_python;
 use crate::tasks::rust::build_rust;
 
 use duct::cmd;
@@ -14,6 +15,7 @@ pub fn build(project_path: &Path, lint_dir: Option<&Path>, build_debug: bool) ->
         ModuleLanguage::Rust => build_rust(project_path, lint_dir, build_debug),
         ModuleLanguage::Csharp => build_csharp(project_path, build_debug),
         ModuleLanguage::Go => build_go(project_path, lint_dir, build_debug),
+        ModuleLanguage::Python => build_python(project_path),
     }?;
     if !build_debug {
         eprintln!("Optimising module with wasm-opt...");

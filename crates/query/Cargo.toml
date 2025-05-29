@@ -18,3 +18,5 @@ spacetimedb-primitives.workspace = true
 spacetimedb-physical-plan.workspace = true
 spacetimedb-sql-parser.workspace = true
 spacetimedb-table.workspace = true
+spacetimedb-telemetry.workspace = true
+tracing.workspace = true

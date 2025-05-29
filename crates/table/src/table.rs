@@ -20,6 +20,7 @@ use super::{
     var_len::VarLenMembers,
     MemoryUsage,
 };
+use tracing::{debug_span, info_span, Instrument};
 use core::ops::RangeBounds;
 use core::{fmt, ptr};
 use core::{
@@ -329,6 +330,18 @@ impl Table {
         blob_store: &'a mut dyn BlobStore,
         row: &ProductValue,
     ) -> Result<(Option<RowHash>, RowRef<'a>), InsertError> {
+        let span = info_span!(
+            "db.table.insert",
+            db.system = "spacetimedb",
+            db.operation = "insert",
+            db.table = %self.schema.table_name,
+            spacetimedb.table_id = %self.schema.table_id,
+            spacetimedb.rows_affected = tracing::field::Empty,
+            spacetimedb.bytes_written = tracing::field::Empty,
+            spacetimedb.pages_accessed = tracing::field::Empty,
+        );
+        let _enter = span.enter();
+
         // Optimistically insert the `row` before checking any constraints
         // under the assumption that errors (unique constraint & set semantic violations) are rare.
         let (row_ref, blob_bytes) = self.insert_physically_pv(pool, blob_store, row)?;
@@ -343,6 +356,12 @@ impl Table {
         let (hash, row_ptr) = unsafe { self.confirm_insertion::<true>(blob_store, row_ptr, blob_bytes) }?;
         // SAFETY: Per post-condition of `confirm_insertion`, `row_ptr` refers to a valid row.
         let row_ref = unsafe { self.get_row_ref_unchecked(blob_store, row_ptr) };
+        
+        // Record metrics
+        span.record("spacetimedb.rows_affected", 1);
+        span.record("spacetimedb.bytes_written", blob_bytes.0);
+        span.record("spacetimedb.pages_accessed", 1);
+        
         Ok((hash, row_ref))
     }
 
@@ -1016,7 +1035,19 @@ impl Table {
         ptr: RowPointer,
         before: impl for<'b> FnOnce(RowRef<'b>) -> R,
     ) -> Option<R> {
+        let span = info_span!(
+            "db.table.delete",
+            db.system = "spacetimedb",
+            db.operation = "delete",
+            db.table = %self.schema.table_name,
+            spacetimedb.table_id = %self.schema.table_id,
+            spacetimedb.rows_affected = tracing::field::Empty,
+            spacetimedb.bytes_deleted = tracing::field::Empty,
+        );
+        let _enter = span.enter();
+
         if !self.is_row_present(ptr) {
+            span.record("spacetimedb.rows_affected", 0);
             return None;
         };
 
@@ -1028,6 +1059,10 @@ impl Table {
         // SAFETY: We've checked above that `self.is_row_present(ptr)`.
         let blob_bytes_deleted = unsafe { self.delete_unchecked(blob_store, ptr) };
         self.update_statistics_deleted_row(blob_bytes_deleted);
+
+        // Record metrics
+        span.record("spacetimedb.rows_affected", 1);
+        span.record("spacetimedb.bytes_deleted", blob_bytes_deleted.0);
 
         Some(ret)
     }
@@ -1121,6 +1156,18 @@ impl Table {
     ///
     /// Caller must promise that `index` was constructed with the same row type/layout as this table.
     pub unsafe fn insert_index(&mut self, blob_store: &dyn BlobStore, index_id: IndexId, mut index: TableIndex) {
+        let span = info_span!(
+            "db.index.create",
+            db.system = "spacetimedb",
+            db.operation = "create_index",
+            db.table = %self.schema.table_name,
+            spacetimedb.table_id = %self.schema.table_id,
+            spacetimedb.index_id = %index_id,
+            spacetimedb.index_type = if index.is_unique() { "unique" } else { "non_unique" },
+            spacetimedb.rows_indexed = tracing::field::Empty,
+        );
+        let _enter = span.enter();
+
         let rows = self.scan_rows(blob_store);
         // SAFETY: Caller promised that table's row type/layout
         // matches that which `index` was constructed with.
@@ -1129,6 +1176,9 @@ impl Table {
         violation.unwrap_or_else(|ptr| {
             panic!("adding `index` should cause no unique constraint violations, but {ptr:?} would")
         });
+        
+        span.record("spacetimedb.rows_indexed", self.num_rows());
+        
         // SAFETY: Forward caller requirement.
         unsafe { self.add_index(index_id, index) };
     }
@@ -1178,6 +1228,17 @@ impl Table {
 
     /// Returns an iterator over all the rows of `self`, yielded as [`RefRef`]s.
     pub fn scan_rows<'a>(&'a self, blob_store: &'a dyn BlobStore) -> TableScanIter<'a> {
+        let span = debug_span!(
+            "db.table.scan",
+            db.system = "spacetimedb",
+            db.operation = "scan",
+            db.table = %self.schema.table_name,
+            spacetimedb.table_id = %self.schema.table_id,
+            spacetimedb.num_rows = %self.num_rows(),
+            spacetimedb.num_pages = %self.num_pages(),
+        );
+        let _enter = span.enter();
+
         TableScanIter {
             current_page: None, // Will be filled by the iterator.
             current_page_idx: PageIndex(0),

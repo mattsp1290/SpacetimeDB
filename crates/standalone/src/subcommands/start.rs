@@ -136,6 +136,7 @@ pub async fn exec(args: &ArgMatches) -> anyhow::Result<()> {
                     .unwrap_or("/var/log/flamegraph.folded".into())
                     .into()
             }),
+            telemetry: config.telemetry.map(|t| t.tracing),
         }),
         ..Default::default()
     }

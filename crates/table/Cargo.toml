@@ -34,6 +34,7 @@ spacetimedb-primitives.workspace = true
 spacetimedb-sats = { workspace = true, features = ["blake3"] }
 spacetimedb-lib.workspace = true
 spacetimedb-schema.workspace = true
+spacetimedb-telemetry.workspace = true
 
 ahash.workspace = true
 blake3.workspace = true
@@ -44,6 +45,7 @@ enum-as-inner.workspace = true
 itertools.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 crossbeam-queue.workspace = true
 
 # For the 'proptest' feature.

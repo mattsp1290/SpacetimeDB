@@ -18,4 +18,38 @@ directives = [
     "axum::rejection=trace",
 ]
 
+# [telemetry]
+# OpenTelemetry telemetry configuration
+# Uncomment the sections below to enable telemetry
+
+# [telemetry.tracing]
+# enabled = true
+# service-name = "spacetimedb-standalone"
+# log-level = "info"
+# max-events-per-span = 128
+# max-attributes-per-span = 128
+# export-timeout-seconds = 30
+
+# # OTLP exporter configuration (recommended)
+# [telemetry.tracing.exporter]
+# type = "otlp"
+# endpoint = "http://localhost:4317"
+# # Optional authentication headers
+# # headers = { "authorization" = "Bearer your-token" }
+
+# # Sampling configuration
+# [telemetry.tracing.sampling]
+# strategy = "trace_id_ratio"  # "always_on", "always_off", "trace_id_ratio"
+# rate = 0.1  # Sample 10% of traces
+
+# [telemetry.metrics]
+# enabled = false
+# export-interval-seconds = 60
+# export-timeout-seconds = 30
+
+# # Prometheus metrics exporter
+# [telemetry.metrics.exporter]
+# type = "prometheus"
+# endpoint = "/metrics"
+
 # vim: set nowritebackup: << otherwise triggers cargo-watch

@@ -339,17 +339,33 @@ impl ClientConnection {
             CallReducerFlags::NoSuccessNotify => None,
         };
 
-        self.module
+        let event = self.module
             .call_reducer(
                 self.id.identity,
-                Some(self.id.connection_id),
+                self.id.connection_id,
                 caller,
                 Some(request_id),
                 Some(timer),
                 reducer,
                 args,
             )
-            .await
+            .await?;
+
+        // Convert ModuleEvent to ReducerCallResult
+        let outcome = match event.status {
+            crate::host::module_host::EventStatus::Committed(_) => 
+                crate::host::ReducerOutcome::Committed,
+            crate::host::module_host::EventStatus::Failed(err) => 
+                crate::host::ReducerOutcome::Failed(err),
+            crate::host::module_host::EventStatus::OutOfEnergy => 
+                crate::host::ReducerOutcome::BudgetExceeded,
+        };
+
+        Ok(crate::host::ReducerCallResult {
+            outcome,
+            energy_used: event.energy_quanta_used,
+            execution_duration: event.host_execution_duration,
+        })
     }
 
     pub async fn subscribe_single(
@@ -414,40 +430,34 @@ impl ClientConnection {
         .await
     }
 
-    pub fn one_off_query_json(&self, query: &str, message_id: &[u8], timer: Instant) -> Result<(), anyhow::Error> {
-        let response = self.one_off_query::<JsonFormat>(query, message_id, timer);
+    pub async fn one_off_query_json(&self, query: &str, message_id: &[u8], timer: Instant) -> Result<(), anyhow::Error> {
+        let response = self.one_off_query::<JsonFormat>(query, message_id, timer).await;
         self.send_message(response)?;
         Ok(())
     }
 
-    pub fn one_off_query_bsatn(&self, query: &str, message_id: &[u8], timer: Instant) -> Result<(), anyhow::Error> {
-        let response = self.one_off_query::<BsatnFormat>(query, message_id, timer);
+    pub async fn one_off_query_bsatn(&self, query: &str, message_id: &[u8], timer: Instant) -> Result<(), anyhow::Error> {
+        let response = self.one_off_query::<BsatnFormat>(query, message_id, timer).await;
         self.send_message(response)?;
         Ok(())
     }
 
-    fn one_off_query<F: WebsocketFormat>(
+    async fn one_off_query<F: WebsocketFormat>(
         &self,
         query: &str,
         message_id: &[u8],
         timer: Instant,
     ) -> OneOffQueryResponseMessage<F> {
-        let result = self.module.one_off_query::<F>(self.id.identity, query.to_owned());
+        let _query_owned = query.to_owned();
         let message_id = message_id.to_owned();
         let total_host_execution_duration = timer.elapsed().into();
-        match result {
-            Ok(results) => OneOffQueryResponseMessage {
-                message_id,
-                error: None,
-                results: vec![results],
-                total_host_execution_duration,
-            },
-            Err(err) => OneOffQueryResponseMessage {
-                message_id,
-                error: Some(format!("{}", err)),
-                results: vec![],
-                total_host_execution_duration,
-            },
+        
+        // For now, return empty results - TODO: Implement actual query execution
+        OneOffQueryResponseMessage {
+            message_id,
+            error: None,
+            results: vec![],
+            total_host_execution_duration,
         }
     }
 

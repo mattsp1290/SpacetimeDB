@@ -70,6 +70,16 @@ impl ResponseExt for reqwest::Response {
         }
         let url = self.url();
         let Some(status_desc) = err_status_desc(status) else {
+            // Check if this looks like an authentication redirect
+            if url.path().contains("/login") {
+                anyhow::bail!(
+                    "Authentication required: Server redirected to login page ({url})\n\
+                    This usually means:\n\
+                    1. You need to log in: `spacetime login`\n\
+                    2. For local development, ensure your SpacetimeDB server is running in development mode\n\
+                    3. Your authentication token may have expired"
+                );
+            }
             anyhow::bail!("HTTP response from url ({url}) was success but did not have content-type: {content_type}");
         };
         let url = url.to_string();
@@ -78,7 +88,21 @@ impl ResponseExt for reqwest::Response {
             Ok(_) => anyhow::anyhow!("{status_desc} ({status}) from url ({url})"),
         };
         let err = match self.text().await {
-            Ok(text) => status_err.context(text),
+            Ok(text) => {
+                // Check if the response text looks like a login redirect
+                if text.contains("login") && text.contains("html") {
+                    anyhow::anyhow!(
+                        "Authentication required: Server returned login page instead of expected JSON response.\n\
+                        This usually means:\n\
+                        1. You need to log in: `spacetime login`\n\
+                        2. For local development, try running: `spacetime start --enable-tracy`\n\
+                        3. Your authentication token may have expired\n\
+                        \nOriginal error: {status_err}"
+                    )
+                } else {
+                    status_err.context(text)
+                }
+            },
             Err(err) => anyhow::Error::from(err)
                 .context(format!("{status_desc} ({status})"))
                 .context("failed to get response text"),
@@ -147,6 +171,11 @@ pub fn add_auth_header_opt(mut builder: RequestBuilder, auth_header: &AuthHeader
         builder = builder.bearer_auth(token);
     }
     builder
+}
+
+/// Utility function to check if a server URL is a local development server
+pub fn is_local_server(url: &str) -> bool {
+    url.contains("127.0.0.1") || url.contains("localhost")
 }
 
 /// Gets the `auth_header` for a request to the server depending on how you want

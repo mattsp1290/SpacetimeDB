@@ -7,6 +7,7 @@ use crate::auth::{
     SpacetimeIdentityToken,
 };
 use crate::routes::subscribe::generate_random_connection_id;
+use crate::telemetry;
 use crate::util::{ByteStringBody, NameOrIdentity};
 use crate::{log_and_500, ControlStateDelegate, DatabaseDef, NodeDelegate};
 use axum::body::{Body, Bytes};
@@ -49,9 +50,30 @@ pub async fn call<S: ControlStateDelegate + NodeDelegate>(
         reducer,
     }): Path<CallParams>,
     TypedHeader(content_type): TypedHeader<headers::ContentType>,
+    headers: axum::http::HeaderMap,
     ByteStringBody(body): ByteStringBody,
 ) -> axum::response::Result<impl IntoResponse> {
+    // Extract distributed tracing context from headers
+    let trace_context = spacetimedb_telemetry::propagation::extract_trace_context_from_headers(&headers);
+    
+    // Create telemetry span for this API call with distributed tracing
+    let span = telemetry::create_database_api_span_with_context(
+        "call_reducer",
+        None, // database_id will be set once resolved
+        None,
+        Some(&trace_context),
+    );
+    let _enter = span.enter();
+    
+    // Record reducer name and request details
+    span.record("spacetimedb.reducer_name", &reducer);
+    span.record("http.request.body.size", body.len());
+    telemetry::record_auth_context(&span, Some(&auth.identity));
+    
+    let start_time = std::time::Instant::now();
+    
     if content_type != headers::ContentType::json() {
+        telemetry::record_error(&span, &axum::extract::rejection::MissingJsonContentType::default());
         return Err(axum::extract::rejection::MissingJsonContentType::default().into());
     }
     let caller_identity = auth.identity;
@@ -66,6 +88,9 @@ pub async fn call<S: ControlStateDelegate + NodeDelegate>(
             NO_SUCH_DATABASE
         })?;
     let identity = database.owner_identity;
+    
+    // Record database identity in span
+    span.record("spacetimedb.database_id", &db_identity.to_hex().to_string());
 
     let leader = worker_ctx
         .leader(database.id)
@@ -103,12 +128,16 @@ pub async fn call<S: ControlStateDelegate + NodeDelegate>(
         Err(e @ ClientConnectedError::DBError(_)) => {
             return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into())
         }
+        // If `call_identity_connected` returns `Err(Other)`, treat it as a general internal error.
+        Err(e @ ClientConnectedError::Other(_)) => {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into())
+        }
 
         // If `call_identity_connected` returns `Ok`, then we can actually call the reducer we want.
         Ok(()) => (),
     }
     let result = match module
-        .call_reducer(caller_identity, Some(connection_id), None, None, None, &reducer, args)
+        .call_reducer(caller_identity, connection_id, None, None, None, &reducer, args)
         .await
     {
         Ok(rcr) => Ok(rcr),
@@ -144,15 +173,41 @@ pub async fn call<S: ControlStateDelegate + NodeDelegate>(
 
     match result {
         Ok(result) => {
-            let (status, body) = reducer_outcome_response(&identity, &reducer, result.outcome);
+            let outcome = match result.status {
+                spacetimedb::host::module_host::EventStatus::Committed(_) => ReducerOutcome::Committed,
+                spacetimedb::host::module_host::EventStatus::Failed(err) => ReducerOutcome::Failed(err),
+                spacetimedb::host::module_host::EventStatus::OutOfEnergy => ReducerOutcome::BudgetExceeded,
+            };
+            let (status, body) = reducer_outcome_response(&identity, &reducer, outcome.clone());
+            
+            // Record telemetry for successful response
+            let elapsed = start_time.elapsed();
+            span.record("http.status_code", status.as_u16());
+            span.record("http.response_time_ms", elapsed.as_millis() as u64);
+            span.record("spacetimedb.reducer_outcome", match outcome {
+                ReducerOutcome::Committed => "committed",
+                ReducerOutcome::Failed(_) => "failed", 
+                ReducerOutcome::BudgetExceeded => "budget_exceeded",
+            });
+            span.record("spacetimedb.energy_used", result.energy_quanta_used.get());
+            span.record("spacetimedb.host_execution_duration_ms", result.host_execution_duration.as_millis() as u64);
+            
             Ok((
                 status,
-                TypedHeader(SpacetimeEnergyUsed(result.energy_used)),
-                TypedHeader(SpacetimeExecutionDurationMicros(result.execution_duration)),
+                TypedHeader(SpacetimeEnergyUsed(result.energy_quanta_used)),
+                TypedHeader(SpacetimeExecutionDurationMicros(result.host_execution_duration)),
                 body,
             ))
         }
-        Err(e) => Err((e.0, e.1).into()),
+        Err(e) => {
+            // Record telemetry for error response
+            let elapsed = start_time.elapsed();
+            span.record("http.status_code", e.0.as_u16());
+            span.record("http.response_time_ms", elapsed.as_millis() as u64);
+            span.record("error.message", &e.1);
+            
+            Err((e.0, e.1).into())
+        }
     }
 }
 
@@ -330,12 +385,8 @@ where
             .await
             .map_err(log_and_500)?
             .ok_or(StatusCode::NOT_FOUND)?;
-        let log_rx = leader
-            .module()
-            .await
-            .map_err(log_and_500)?
-            .subscribe_to_logs()
-            .map_err(log_and_500)?;
+        let module = leader.module().await.map_err(log_and_500)?;
+        let log_rx = module.info.log_tx.subscribe();
 
         let stream = tokio_stream::wrappers::BroadcastStream::new(log_rx).filter_map(move |x| {
             std::future::ready(match x {
@@ -393,11 +444,31 @@ pub async fn sql<S>(
     Path(SqlParams { name_or_identity }): Path<SqlParams>,
     Query(SqlQueryParams {}): Query<SqlQueryParams>,
     Extension(auth): Extension<SpacetimeAuth>,
+    headers: axum::http::HeaderMap,
     body: String,
 ) -> axum::response::Result<impl IntoResponse>
 where
     S: NodeDelegate + ControlStateDelegate,
 {
+    // Extract distributed tracing context from headers
+    let trace_context = spacetimedb_telemetry::propagation::extract_trace_context_from_headers(&headers);
+    
+    // Create telemetry span for SQL execution with distributed tracing
+    let span = telemetry::create_database_api_span_with_context(
+        "execute_sql",
+        None, // database_id will be set once resolved
+        None,
+        Some(&trace_context),
+    );
+    let _enter = span.enter();
+    
+    // Record SQL query details
+    span.record("http.request.body.size", body.len());
+    span.record("spacetimedb.sql_query_length", body.len());
+    telemetry::record_auth_context(&span, Some(&auth.identity));
+    
+    let start_time = std::time::Instant::now();
+
     // Anyone is authorized to execute SQL queries. The SQL engine will determine
     // which queries this identity is allowed to execute against the database.
 
@@ -405,6 +476,9 @@ where
     let database = worker_ctx_find_database(&worker_ctx, &db_identity)
         .await?
         .ok_or(NO_SUCH_DATABASE)?;
+
+    // Record database identity in span
+    span.record("spacetimedb.database_id", &db_identity.to_hex().to_string());
 
     let auth = AuthCtx::new(database.owner_identity, auth.identity);
     log::debug!("auth: {auth:?}");
@@ -417,6 +491,13 @@ where
     let json = host.exec_sql(auth, database, body).await?;
 
     let total_duration = json.iter().fold(0, |acc, x| acc + x.total_duration_micros);
+    let elapsed = start_time.elapsed();
+
+    // Record telemetry for successful SQL execution
+    span.record("http.status_code", 200u16);
+    span.record("http.response_time_ms", elapsed.as_millis() as u64);
+    span.record("spacetimedb.sql_execution_duration_ms", total_duration / 1000);
+    span.record("spacetimedb.sql_statements_count", json.len());
 
     Ok((
         TypedHeader(SpacetimeExecutionDurationMicros(Duration::from_micros(total_duration))),

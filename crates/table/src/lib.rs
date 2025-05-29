@@ -25,6 +25,7 @@ pub mod static_bsatn_validator;
 pub mod static_layout;
 pub mod table;
 pub mod table_index;
+pub mod telemetry;
 pub mod var_len;
 
 mod memory_usage;

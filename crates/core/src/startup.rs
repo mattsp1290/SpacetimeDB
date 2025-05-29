@@ -40,6 +40,8 @@ pub struct TracingOptions {
     /// Enables tracy profiling.
     pub tracy: bool,
     pub flamegraph: Option<PathBuf>,
+    /// OpenTelemetry telemetry configuration
+    pub telemetry: Option<spacetimedb_telemetry::config::TracingConfig>,
 }
 
 impl Default for TracingOptions {
@@ -51,6 +53,7 @@ impl Default for TracingOptions {
             edition: "standalone".to_owned(),
             tracy: false,
             flamegraph: None,
+            telemetry: None,
         }
     }
 }
@@ -71,6 +74,23 @@ fn configure_tracing(opts: TracingOptions) {
     // This means you can change the default log level to trace
     // if you are trying to debug an issue and need more logs on then turn it off
     // once you are done.
+
+    // Initialize OpenTelemetry global components if telemetry is enabled
+    if let Some(ref telemetry_config) = opts.telemetry {
+        if telemetry_config.enabled {
+            // Set global error handler
+            if let Err(e) = opentelemetry::global::set_error_handler(|error| {
+                tracing::error!("OpenTelemetry error: {}", error);
+            }) {
+                log::warn!("Failed to set OpenTelemetry error handler: {}", e);
+            }
+
+            // Initialize propagator for distributed tracing
+            opentelemetry::global::set_text_map_propagator(
+                opentelemetry_sdk::propagation::TraceContextPropagator::new()
+            );
+        }
+    }
 
     let timer = tracing_subscriber::fmt::time();
     let format = tracing_subscriber::fmt::format::Format::default()
@@ -112,8 +132,34 @@ fn configure_tracing(opts: TracingOptions) {
         (None, None)
     };
 
-    // Is important for `tracy_layer` to be before `fmt_layer` to not print ascii codes...
+    // Create OpenTelemetry layer if enabled
+    let telemetry_layer = if let Some(telemetry_config) = opts.telemetry {
+        if telemetry_config.enabled {
+            match tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(
+                    spacetimedb_telemetry::create_tracing_layer(&telemetry_config)
+                )
+            }) {
+                Ok(layer) => {
+                    log::info!("OpenTelemetry tracing layer created successfully");
+                    Some(layer)
+                },
+                Err(e) => {
+                    log::warn!("Failed to create telemetry layer: {}. Continuing without telemetry.", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Build subscriber with all layers at once
+    // Tracy layer before fmt layer to avoid ASCII codes
     let subscriber = tracing_subscriber::Registry::default()
+        .with(telemetry_layer)
         .with(tracy_layer)
         .with(fmt_layer)
         .with(flame_layer);

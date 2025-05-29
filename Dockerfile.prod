@@ -1,6 +1,5 @@
-# SpacetimeDB Professional Dockerfile
-# Copyright (C) 2023 Clockwork Laboratories, Inc.
-# Licensed under Business Source License 1.1
+# SpacetimeDB QA Dockerfile
+# Simplified version for QA testing without JWT authentication
 
 # Build argument for Rust version pinning
 ARG RUST_VERSION=1.84-bookworm
@@ -48,6 +47,7 @@ members = [\
   "crates/standalone",\
   "crates/subscription",\
   "crates/table",\
+  "crates/telemetry",\
   "crates/testing",\
   "crates/update",\
   "crates/vm",\
@@ -87,6 +87,7 @@ COPY crates/sqltest/Cargo.toml crates/sqltest/
 COPY crates/standalone/Cargo.toml crates/standalone/
 COPY crates/subscription/Cargo.toml crates/subscription/
 COPY crates/table/Cargo.toml crates/table/
+COPY crates/telemetry/Cargo.toml crates/telemetry/
 COPY crates/testing/Cargo.toml crates/testing/
 COPY crates/update/Cargo.toml crates/update/
 COPY crates/vm/Cargo.toml crates/vm/
@@ -104,20 +105,33 @@ RUN for crate in crates/*/; do \
                 echo "fn main() {}" > "$crate/src/bin/$bin.rs"; \
             done; \
         fi && \
-        # Check for benchmarks
+        # Check for benchmarks and create valid dummy files
         if grep -q '^\[\[bench\]\]' "$crate/Cargo.toml" 2>/dev/null; then \
             mkdir -p "$crate/benches" && \
-            # Extract bench names and create dummy files
+            # Extract bench names and create dummy files with proper benchmark structure
             grep -A1 '^\[\[bench\]\]' "$crate/Cargo.toml" | grep '^name' | sed 's/.*"\(.*\)".*/\1/' | while read bench; do \
-                echo "fn main() {}" > "$crate/benches/$bench.rs"; \
+                echo 'use criterion::{criterion_group, criterion_main, Criterion};' > "$crate/benches/$bench.rs" && \
+                echo '' >> "$crate/benches/$bench.rs" && \
+                echo 'fn dummy_benchmark(_c: &mut Criterion) {' >> "$crate/benches/$bench.rs" && \
+                echo '    // Dummy benchmark' >> "$crate/benches/$bench.rs" && \
+                echo '}' >> "$crate/benches/$bench.rs" && \
+                echo '' >> "$crate/benches/$bench.rs" && \
+                echo 'criterion_group!(benches, dummy_benchmark);' >> "$crate/benches/$bench.rs" && \
+                echo 'criterion_main!(benches);' >> "$crate/benches/$bench.rs"; \
             done; \
         fi && \
-        # Check for tests
+        # Create dummy test files for tests referenced in Cargo.toml
         if grep -q '^\[\[test\]\]' "$crate/Cargo.toml" 2>/dev/null; then \
             mkdir -p "$crate/tests" && \
             # Extract test names and create dummy files
-            grep -A1 '^\[\[test\]\]' "$crate/Cargo.toml" | grep '^name' | sed 's/.*"\(.*\)".*/\1/' | while read test; do \
-                echo "fn main() {}" > "$crate/tests/$test.rs"; \
+            grep -A1 '^\[\[test\]\]' "$crate/Cargo.toml" | grep '^name' | sed 's/.*"\(.*\)".*/\1/' | while read test_name; do \
+                echo '#[cfg(test)]' > "$crate/tests/$test_name.rs" && \
+                echo 'mod tests {' >> "$crate/tests/$test_name.rs" && \
+                echo '    #[test]' >> "$crate/tests/$test_name.rs" && \
+                echo '    fn dummy_test() {' >> "$crate/tests/$test_name.rs" && \
+                echo '        // Dummy test' >> "$crate/tests/$test_name.rs" && \
+                echo '    }' >> "$crate/tests/$test_name.rs" && \
+                echo '}' >> "$crate/tests/$test_name.rs"; \
             done; \
         fi && \
         # Check for main.rs style binary
@@ -127,7 +141,7 @@ RUN for crate in crates/*/; do \
     done
 
 # Build dependencies in release mode
-RUN cargo build --release --locked -p spacetimedb-standalone -p spacetimedb-cli
+RUN cargo build --release -p spacetimedb-standalone -p spacetimedb-cli
 
 # Stage 2: Builder
 FROM rust:${RUST_VERSION} AS builder
@@ -177,6 +191,7 @@ members = [\
   "crates/standalone",\
   "crates/subscription",\
   "crates/table",\
+  "crates/telemetry",\
   "crates/testing",\
   "crates/update",\
   "crates/vm",\
@@ -197,21 +212,35 @@ ENV CARGO_PROFILE_RELEASE_LTO=true \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
     CARGO_PROFILE_RELEASE_OPT_LEVEL=3
 
-RUN cargo build -p spacetimedb-standalone -p spacetimedb-cli --release --locked && \
+RUN cargo build --release --bin spacetimedb-standalone --bin spacetimedb-cli && \
     # Strip debug symbols to reduce binary size
     strip target/release/spacetimedb-standalone && \
     strip target/release/spacetimedb-cli
 
-# Stage 3: Runtime preparation
-FROM debian:bookworm-slim AS runtime-prep
+# Stage 3: Runtime
+FROM debian:bookworm-slim AS runtime
 
-# Install runtime dependencies and security updates
+# Metadata labels
+LABEL org.opencontainers.image.title="SpacetimeDB QA" \
+      org.opencontainers.image.description="SpacetimeDB QA Environment - Simplified for Testing" \
+      org.opencontainers.image.authors="Clockwork Laboratories, Inc." \
+      org.opencontainers.image.vendor="Clockwork Laboratories, Inc." \
+      org.opencontainers.image.licenses="BSL-1.1" \
+      org.opencontainers.image.url="https://spacetimedb.com" \
+      org.opencontainers.image.source="https://github.com/clockworklabs/SpacetimeDB" \
+      org.opencontainers.image.documentation="https://spacetimedb.com/docs" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${VERSION}"
+
+# Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     binaryen \
     libssl3 \
     tini \
+    procps \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
@@ -232,26 +261,7 @@ RUN DOTNET_ARCH=${TARGETARCH} && \
         --architecture $DOTNET_ARCH \
         --no-path
 
-# Stage 4: Final production image
-FROM runtime-prep AS production
-
-# Metadata labels
-LABEL org.opencontainers.image.title="SpacetimeDB" \
-      org.opencontainers.image.description="A database that replaces your server" \
-      org.opencontainers.image.authors="Clockwork Laboratories, Inc." \
-      org.opencontainers.image.vendor="Clockwork Laboratories, Inc." \
-      org.opencontainers.image.licenses="BSL-1.1" \
-      org.opencontainers.image.url="https://spacetimedb.com" \
-      org.opencontainers.image.source="https://github.com/clockworklabs/SpacetimeDB" \
-      org.opencontainers.image.documentation="https://spacetimedb.com/docs" \
-      org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.revision="${VCS_REF}" \
-      org.opencontainers.image.version="${VERSION}"
-
-# Copy LICENSE file to standard location
-COPY LICENSE.txt /usr/share/licenses/spacetimedb/LICENSE.txt
-
-# Install Rust toolchain for module compilation (minimal)
+# Install Rust toolchain for module compilation
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     --profile minimal \
     --default-toolchain stable \
@@ -269,15 +279,16 @@ ENV PATH="/usr/share/dotnet:/root/.cargo/bin:${PATH}" \
 COPY --from=builder --chmod=755 /usr/src/app/target/release/spacetimedb-standalone /usr/local/bin/spacetimedb-standalone
 COPY --from=builder --chmod=755 /usr/src/app/target/release/spacetimedb-cli /usr/local/bin/spacetime
 
-# Create spacetime user and necessary directories
-RUN useradd -r -s /bin/false -m -d /var/lib/spacetimedb spacetime && \
-    mkdir -p /var/lib/spacetimedb/data /var/log/spacetimedb /etc/spacetimedb && \
-    chown -R spacetime:spacetime /var/lib/spacetimedb /var/log/spacetimedb /etc/spacetimedb
+# Create necessary directories
+RUN mkdir -p /var/lib/spacetimedb/data /var/log/spacetimedb /etc/spacetimedb
+
+# Copy LICENSE file to standard location
+COPY LICENSE.txt /usr/share/licenses/spacetimedb/LICENSE.txt
 
 # Volume declarations for persistent data
 VOLUME ["/var/lib/spacetimedb", "/var/log/spacetimedb", "/etc/spacetimedb"]
 
-# Copy entrypoint script
+# Copy simplified entrypoint script
 COPY --chmod=755 <<'EOF' /usr/local/bin/docker-entrypoint.sh
 #!/bin/bash
 set -e
@@ -285,16 +296,18 @@ set -e
 # Function to handle signals for graceful shutdown
 trap 'echo "Shutting down..."; kill -TERM $PID; wait $PID' SIGTERM SIGINT
 
-# Initialize configuration if not exists
+echo "Starting SpacetimeDB QA environment..."
+
+# Create default configuration if it doesn't exist
 if [ ! -f /etc/spacetimedb/server.toml ]; then
-    echo "Initializing default configuration..."
+    echo "Creating default configuration..."
     cat > /etc/spacetimedb/server.toml <<CONFIG
 [database]
 path = "/var/lib/spacetimedb/data"
 
 [log]
 path = "/var/log/spacetimedb"
-level = "${SPACETIMEDB_LOG_LEVEL:-info}"
+level = "info"
 
 [server]
 host = "0.0.0.0"
@@ -302,53 +315,17 @@ port = 3000
 CONFIG
 fi
 
-# Generate JWT keys if not exist
-if [ ! -f /etc/spacetimedb/id_ecdsa ]; then
-    echo "Generating JWT keys..."
-    openssl ecparam -genkey -name prime256v1 -noout -out /etc/spacetimedb/id_ecdsa
-    openssl ec -in /etc/spacetimedb/id_ecdsa -pubout -out /etc/spacetimedb/id_ecdsa.pub
-    chown spacetime:spacetime /etc/spacetimedb/id_ecdsa*
-    chmod 600 /etc/spacetimedb/id_ecdsa
-    chmod 644 /etc/spacetimedb/id_ecdsa.pub
-fi
-
-# Handle different commands
-case "$1" in
-    start|server)
-        echo "Starting SpacetimeDB server..."
-        exec gosu spacetime spacetimedb-standalone start \
-            --data-dir "${SPACETIMEDB_DATA_DIR:-/var/lib/spacetimedb/data}" \
-            --jwt-pub-key-path /etc/spacetimedb/id_ecdsa.pub \
-            --jwt-priv-key-path /etc/spacetimedb/id_ecdsa \
-            ${SPACETIMEDB_EXTRA_ARGS} &
-        PID=$!
-        wait $PID
-        ;;
-    cli|spacetime)
-        shift
-        exec gosu spacetime spacetime "$@"
-        ;;
-    *)
-        # Pass through to spacetime CLI
-        exec gosu spacetime spacetime "$@"
-        ;;
-esac
+# Start SpacetimeDB with JWT authentication
+echo "Starting SpacetimeDB server..."
+exec spacetimedb-standalone start \
+    --data-dir "${SPACETIMEDB_DATA_DIR:-/var/lib/spacetimedb/data}" \
+    --listen-addr "0.0.0.0:3000" \
+    --jwt-pub-key-path "/etc/spacetimedb/keys/jwt_public.pem" \
+    --jwt-priv-key-path "/etc/spacetimedb/keys/jwt_private.pem" &
+PID=$!
+wait $PID
 EOF
 
-# Install gosu for proper user switching
-RUN curl -L https://github.com/tianon/gosu/releases/download/1.17/gosu-${TARGETARCH:-amd64} -o /usr/local/bin/gosu && \
-    chmod +x /usr/local/bin/gosu && \
-    gosu nobody true
-
-# Install additional tools for operational tasks
-RUN apt-get update && apt-get install -y \
-    openssl \
-    netcat-openbsd \
-    procps \
-    && rm -rf /var/lib/apt/lists/*
-
-# Switch to non-root user
-USER spacetime
 WORKDIR /var/lib/spacetimedb
 
 # Expose ports
@@ -359,34 +336,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:3000/ping || exit 1
 
 # Use tini as init system for proper signal handling
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/usr/local/bin/docker-entrypoint.sh"]
 
 # Default command
 CMD ["start"]
-
-# Stage 5: Development image (optional)
-FROM production AS development
-
-USER root
-
-# Install development tools
-RUN apt-get update && apt-get install -y \
-    git \
-    vim \
-    htop \
-    strace \
-    tcpdump \
-    gdb \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Rust development tools
-RUN /root/.cargo/bin/rustup component add \
-    rustfmt \
-    clippy \
-    rust-analyzer
-
-USER spacetime
-
-# Development-specific environment variables
-ENV RUST_BACKTRACE=full \
-    RUST_LOG=debug

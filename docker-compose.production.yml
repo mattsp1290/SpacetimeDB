@@ -12,6 +12,7 @@ services:
       dockerfile: Dockerfile.prod
     container_name: spacetimedb-production
     restart: unless-stopped
+    user: root
     
     # Use init system for proper signal handling
     init: true
@@ -27,10 +28,13 @@ services:
       - spacetimedb-logs:/var/log/spacetimedb
       
       # Configuration directory (optional - for custom configs)
-      - ./config:/etc/spacetimedb:ro
+      - ./config:/etc/spacetimedb
       
       # Module deployment directory (optional - for easy module publishing)
       - ./modules:/opt/modules:ro
+      
+      # JWT keys directory (required for authentication)
+      - ./keys:/etc/spacetimedb/keys:ro
     
     environment:
       # Logging configuration
@@ -62,9 +66,9 @@ services:
     networks:
       - spacetime-network
     
-    # Security options
-    security_opt:
-      - no-new-privileges:true
+    # Security options (commented out to allow user switching)
+    # security_opt:
+    #   - no-new-privileges:true
     
     # Logging configuration
     logging:

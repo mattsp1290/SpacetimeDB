@@ -12,6 +12,11 @@ spacetimedb-data-structures.workspace = true
 spacetimedb-lib = { workspace = true, features = ["serde"] }
 spacetimedb-paths.workspace = true
 spacetimedb-schema.workspace = true
+spacetimedb-telemetry = { path = "../telemetry" }
+
+# OpenTelemetry dependencies for distributed tracing
+opentelemetry = "0.22"
+tracing-opentelemetry = "0.23"
 
 tokio = { version = "1.2", features = ["full"] }
 lazy_static = "1.4.0"

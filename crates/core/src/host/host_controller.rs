@@ -650,7 +650,6 @@ async fn update_module(
     db: &RelationalDB,
     module: &ModuleHost,
     program: Program,
-    old_module_info: Arc<ModuleInfo>,
 ) -> anyhow::Result<UpdateDatabaseResult> {
     let addr = db.database_identity();
     match stored_program_hash(db)? {
@@ -661,7 +660,7 @@ async fn update_module(
                 UpdateDatabaseResult::NoUpdateNeeded
             } else {
                 info!("updating `{}` from {} to {}", addr, stored, program.hash);
-                module.update_database(program, old_module_info).await?
+                module.update_database(program).await?
             };
 
             Ok(res)
@@ -908,7 +907,7 @@ impl Host {
         // Get the old module info to diff against when building a migration plan.
         let old_module_info = self.module.borrow().info.clone();
 
-        let update_result = update_module(&replica_ctx.relational_db, &module, program, old_module_info).await?;
+        let update_result = update_module(&replica_ctx.relational_db, &module, program).await?;
         trace!("update result: {update_result:?}");
         // Only replace the module + scheduler if the update succeeded.
         // Otherwise, we want the database to continue running with the old state.

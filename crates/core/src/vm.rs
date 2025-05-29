@@ -26,6 +26,7 @@ use spacetimedb_vm::rel_ops::{EmptyRelOps, RelOps};
 use spacetimedb_vm::relation::{MemTable, RelValue};
 use std::str::FromStr;
 use std::sync::Arc;
+use tracing::{debug_span, info_span};
 
 pub enum TxMode<'a> {
     MutTx(&'a mut MutTx),
@@ -488,6 +489,16 @@ impl<'db, 'tx> DbProgram<'db, 'tx> {
     }
 
     fn _eval_query<const N: usize>(&mut self, query: &QueryExpr, sources: Sources<'_, N>) -> Result<Code, ErrorVm> {
+        let span = debug_span!(
+            "db.vm.eval_query",
+            db.system = "spacetimedb",
+            db.operation = "query",
+            db.table = %query.source.table_name(),
+            spacetimedb.rows_scanned = tracing::field::Empty,
+            spacetimedb.rows_returned = tracing::field::Empty,
+        );
+        let _enter = span.enter();
+
         if let TxMode::Tx(tx) = self.tx {
             check_row_limit(
                 &[query],
@@ -506,6 +517,8 @@ impl<'db, 'tx> DbProgram<'db, 'tx> {
             sources.take(id).map(|mt| mt.into_iter().map(RelValue::Projection))
         })
         .collect_vec(|row| row.into_product_value());
+
+        span.record("spacetimedb.rows_returned", rows.len());
 
         Ok(Code::Table(MemTable::new(head, table_access, rows)))
     }
