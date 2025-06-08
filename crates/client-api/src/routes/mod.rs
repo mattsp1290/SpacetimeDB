@@ -40,4 +40,5 @@ where
     axum::Router::new()
         .nest("/v1", router.layer(cors))
         .nest("/internal", internal::router())
+        .nest("/health", health::router())
 }

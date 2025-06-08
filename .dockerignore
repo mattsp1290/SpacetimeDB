@@ -57,7 +57,7 @@ __pycache__/
 
 # Development scripts
 run_*.sh
-tools/
+# tools/  # Commented out to include tools/upgrade-version in Docker build
 git-hooks/
 
 # Images and assets (except what's needed)
